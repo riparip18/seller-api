@@ -1,0 +1,29 @@
+{
+  "name": "seller-api-control-panel",
+  "version": "1.0.0",
+  "description": "VCGamers Seller API Control Panel with Ant Design",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "echo 'No build step needed for this setup'",
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.7.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "vcgamers",
+    "seller-api",
+    "webhook",
+    "antd",
+    "control-panel"
+  ],
+  "author": "VCGamers QA Team",
+  "license": "MIT"
+}

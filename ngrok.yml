@@ -1,0 +1,11 @@
+version: "2"
+authtoken: 328HMwgr03C5cutcGnEofHslW11_5Dxk1GzCR95Ed9hPMjzKH
+
+tunnels:
+  seller-api:
+    proto: http
+    addr: 5000
+    hostname: shining-stork-briefly.ngrok-free.app
+    bind_tls: true
+
+region: ap
