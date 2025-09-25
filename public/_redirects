@@ -1,6 +1,8 @@
-# Proxy API calls to live backend (edit the domain if you host elsewhere)
-/api/* https://shining-stork-briefly.ngrok-free.app/api/:splat 200
-/webhook https://shining-stork-briefly.ngrok-free.app/webhook 200
+# Redirect to Netlify Functions
+/api/status /.netlify/functions/api-status 200
+/api/start /.netlify/functions/api-start 200
+/api/stop  /.netlify/functions/api-stop  200
+/webhook   /.netlify/functions/webhook   200
 
 # SPA fallback to index.html
 /* /index.html 200

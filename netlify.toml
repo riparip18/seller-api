@@ -1,17 +1,30 @@
 [build]
   publish = "public"
   command = ""
+  functions = "netlify/functions"
 
-# Redirect API calls to live backend (adjust the domain when you move hosting)
+# Redirect API calls to Netlify Functions
 [[redirects]]
-  from = "/api/*"
-  to = "https://shining-stork-briefly.ngrok-free.app/api/:splat"
+  from = "/api/status"
+  to = "/.netlify/functions/api-status"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/start"
+  to = "/.netlify/functions/api-start"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/stop"
+  to = "/.netlify/functions/api-stop"
   status = 200
   force = true
 
 [[redirects]]
   from = "/webhook"
-  to = "https://shining-stork-briefly.ngrok-free.app/webhook"
+  to = "/.netlify/functions/webhook"
   status = 200
   force = true
 
