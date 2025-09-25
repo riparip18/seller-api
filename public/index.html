@@ -67,6 +67,7 @@
             const [running, setRunning] = useState(false);
             const [loading, setLoading] = useState(false);
             const [urls, setUrls] = useState({ webhook_url: '', status_url: '' });
+            const [controlsEnabled, setControlsEnabled] = useState(false);
 
             const fetchStatus = async () => {
                 try {
@@ -74,6 +75,7 @@
                     const data = await res.json();
                     if (data.success) {
                         setRunning(Boolean(data.data?.tunnel_running));
+                        setControlsEnabled(Boolean(data.data?.controls_enabled));
                         setUrls({
                             webhook_url: data.data?.webhook_url || '',
                             status_url: data.data?.status_url || ''
@@ -106,17 +108,23 @@
             return (
                 <div className="container">
                     <div className="panel">
-                        <Button
-                            type={running ? 'primary' : 'primary'}
-                            danger={running}
-                            size="large"
-                            className="big-button"
-                            data-testid="toggle-service"
-                            onClick={toggle}
-                            loading={loading}
-                        >
-                            {running ? 'Stop App' : 'Start App'}
-                        </Button>
+                        {controlsEnabled ? (
+                            <Button
+                                type={running ? 'primary' : 'primary'}
+                                danger={running}
+                                size="large"
+                                className="big-button"
+                                data-testid="toggle-service"
+                                onClick={toggle}
+                                loading={loading}
+                            >
+                                {running ? 'Stop App' : 'Start App'}
+                            </Button>
+                        ) : (
+                            <Button type="primary" size="large" className="big-button" disabled>
+                                Running on Hosting
+                            </Button>
+                        )}
                         <div className="hint">
                             <Text type="secondary">
                                 {running ? `Webhook: ${urls.webhook_url}` : 'Service stopped'}

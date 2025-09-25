@@ -9,7 +9,7 @@ const fs = require('fs');
 const { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN } = require('./config');
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors());
@@ -23,7 +23,8 @@ let serviceState = {
 	tunnel_pid: null,
 	webhook_url: `https://${NGROK_STATIC_DOMAIN}/webhook`,
 	status_url: `https://${NGROK_STATIC_DOMAIN}/`,
-	last_check: new Date()
+	last_check: new Date(),
+	controls_enabled: process.env.ENABLE_CONTROLS !== 'false'
 };
 
 const processedIds = new Set();
@@ -209,11 +210,13 @@ app.get('/api/status', async (req, res) => {
 });
 
 app.post('/api/start', async (req, res) => {
+	if (!serviceState.controls_enabled) return res.status(403).json({ success: false, message: 'Controls disabled in production' });
 	const result = await startNgrok();
 	res.json({ success: result.success, message: result.message, data: serviceState });
 });
 
 app.post('/api/stop', async (req, res) => {
+	if (!serviceState.controls_enabled) return res.status(403).json({ success: false, message: 'Controls disabled in production' });
 	const ok = await stopNgrok();
 	res.json({ success: ok, message: ok ? 'Ngrok stopped' : 'Failed to stop ngrok', data: serviceState });
 });
