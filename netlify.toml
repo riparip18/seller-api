@@ -1,0 +1,22 @@
+[build]
+  publish = "public"
+  command = ""
+
+# Redirect API calls to live backend (adjust the domain when you move hosting)
+[[redirects]]
+  from = "/api/*"
+  to = "https://shining-stork-briefly.ngrok-free.app/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/webhook"
+  to = "https://shining-stork-briefly.ngrok-free.app/webhook"
+  status = 200
+  force = true
+
+# SPA fallback
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

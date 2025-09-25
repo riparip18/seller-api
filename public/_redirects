@@ -1,0 +1,6 @@
+# Proxy API calls to live backend (edit the domain if you host elsewhere)
+/api/* https://shining-stork-briefly.ngrok-free.app/api/:splat 200
+/webhook https://shining-stork-briefly.ngrok-free.app/webhook 200
+
+# SPA fallback to index.html
+/* /index.html 200
