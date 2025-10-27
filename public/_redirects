@@ -3,6 +3,11 @@
 /api/start /.netlify/functions/api-start 200
 /api/stop  /.netlify/functions/api-stop  200
 /webhook   /.netlify/functions/webhook   200
+/api/transactions /.netlify/functions/transactions 200
+/api/transactions/summary /.netlify/functions/transactions-summary 200
+/api/balance /.netlify/functions/balance 200
+/api/balance/histories /.netlify/functions/balance-histories 200
+/api/balance/summary /.netlify/functions/balance-summary 200
 
 # SPA fallback to index.html
 /* /index.html 200

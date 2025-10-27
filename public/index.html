@@ -60,14 +60,18 @@
 
     <script type="text/babel" data-presets="env,react" data-plugins="proposal-optional-chaining">
         const { useState, useEffect } = React;
-        const { Button, Typography, message } = antd;
-        const { Text } = Typography;
+        const { Button, Typography, message, DatePicker, Card, Statistic, Space, Tabs, Radio } = antd;
+        const { Text, Title } = Typography;
 
         function App() {
             const [running, setRunning] = useState(false);
             const [loading, setLoading] = useState(false);
             const [urls, setUrls] = useState({ webhook_url: '', status_url: '' });
             const [controlsEnabled, setControlsEnabled] = useState(false);
+            const [summaryLoading, setSummaryLoading] = useState(false);
+            const [summary, setSummary] = useState({ pendapatan: 0, potongan: 0, laba_bersih: 0 });
+            const [range, setRange] = useState([dayjs().startOf('month'), dayjs().endOf('month')]);
+            const [source, setSource] = useState('transactions'); // 'transactions' | 'balance'
 
             const fetchStatus = async () => {
                 try {
@@ -105,31 +109,107 @@
 
             useEffect(() => { fetchStatus(); }, []);
 
+            const fetchSummary = async () => {
+                setSummaryLoading(true);
+                try {
+                    let endpoint = '/api/transactions/summary';
+                    const [start, end] = range || [];
+                    const params = new URLSearchParams();
+                    if (source === 'transactions') {
+                        if (start) params.set('date_start', start.format('YYYY-MM-DD'));
+                        if (end) params.set('date_end', end.format('YYYY-MM-DD'));
+                    } else {
+                        // Balance histories doesn't support date range directly; allow search keyword if needed
+                    }
+                    if (source === 'balance') endpoint = '/api/balance/summary';
+                    const res = await fetch(`${endpoint}?${params.toString()}`);
+                    const data = await res.json();
+                    if (data.success) {
+                        setSummary(data.data || { pendapatan: 0, potongan: 0, laba_bersih: 0 });
+                    } else {
+                        message.error('Gagal mengambil ringkasan');
+                    }
+                } catch (_) {
+                    message.error('Koneksi gagal');
+                } finally {
+                    setSummaryLoading(false);
+                }
+            };
+
             return (
                 <div className="container">
                     <div className="panel">
-                        {controlsEnabled ? (
-                            <Button
-                                type={running ? 'primary' : 'primary'}
-                                danger={running}
-                                size="large"
-                                className="big-button"
-                                data-testid="toggle-service"
-                                onClick={toggle}
-                                loading={loading}
-                            >
-                                {running ? 'Stop App' : 'Start App'}
-                            </Button>
-                        ) : (
-                            <Button type="primary" size="large" className="big-button" disabled>
-                                Running on Hosting
-                            </Button>
-                        )}
-                        <div className="hint">
-                            <Text type="secondary">
-                                {running ? `Webhook: ${urls.webhook_url}` : 'Service stopped'}
-                            </Text>
-                        </div>
+                        <Tabs
+                          defaultActiveKey="control"
+                          items={[
+                            {
+                              key: 'control',
+                              label: 'Control',
+                              children: (
+                                <div>
+                                    {controlsEnabled ? (
+                                        <Button
+                                            type={running ? 'primary' : 'primary'}
+                                            danger={running}
+                                            size="large"
+                                            className="big-button"
+                                            data-testid="toggle-service"
+                                            onClick={toggle}
+                                            loading={loading}
+                                        >
+                                            {running ? 'Stop App' : 'Start App'}
+                                        </Button>
+                                    ) : (
+                                        <Button type="primary" size="large" className="big-button" disabled>
+                                            Running on Hosting
+                                        </Button>
+                                    )}
+                                    <div className="hint">
+                                        <Text type="secondary">
+                                            {running ? `Webhook: ${urls.webhook_url}` : 'Service stopped'}
+                                        </Text>
+                                    </div>
+                                </div>
+                              )
+                            },
+                            {
+                              key: 'report',
+                              label: 'Laporan',
+                              children: (
+                                <div>
+                                    <Space direction="vertical" size="large" style={{ width: '100%' }}>
+                                        <Space>
+                                            <Radio.Group value={source} onChange={(e) => setSource(e.target.value)}>
+                                                <Radio.Button value="transactions">Transaksi</Radio.Button>
+                                                <Radio.Button value="balance">Balance</Radio.Button>
+                                            </Radio.Group>
+                                            <DatePicker.RangePicker
+                                                allowClear={false}
+                                                value={range}
+                                                onChange={(v) => setRange(v)}
+                                                format="YYYY-MM-DD"
+                                            />
+                                            <Button type="primary" onClick={fetchSummary} loading={summaryLoading} data-testid="fetch-summary">
+                                                Hitung
+                                            </Button>
+                                        </Space>
+                                        <Space size="large" wrap>
+                                            <Card bordered style={{ minWidth: 220 }}>
+                                                <Statistic title="Pendapatan" prefix="Rp" value={summary.pendapatan} precision={0} />
+                                            </Card>
+                                            <Card bordered style={{ minWidth: 220 }}>
+                                                <Statistic title="Potongan" prefix="Rp" value={summary.potongan} precision={0} />
+                                            </Card>
+                                            <Card bordered style={{ minWidth: 220 }}>
+                                                <Statistic title="Laba Bersih" prefix="Rp" value={summary.laba_bersih} precision={0} />
+                                            </Card>
+                                        </Space>
+                                    </Space>
+                                </div>
+                              )
+                            }
+                          ]}
+                        />
                     </div>
                 </div>
             );

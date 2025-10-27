@@ -1,0 +1,46 @@
+const axios = require('axios');
+const { ACCESS_KEY, SECRET_KEY, BASE_URL } = require('../../config');
+const crypto = require('crypto');
+
+function generateSignature(pathStr) {
+  const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 12);
+  const toSign = `${pathStr}${ACCESS_KEY}${timestamp}`;
+  const hmac = crypto.createHmac('sha512', SECRET_KEY).update(toSign, 'utf8').digest('hex');
+  const signature = Buffer.from(hmac, 'utf8').toString('base64');
+  return { signature, timestamp };
+}
+
+exports.handler = async function handler(event) {
+  try {
+    if (event.httpMethod !== 'GET') {
+      return { statusCode: 405, body: 'Method Not Allowed' };
+    }
+
+    const pathStr = '/rest/transaction/all';
+    const { signature, timestamp } = generateSignature(pathStr);
+    const url = `${BASE_URL}${pathStr}`;
+
+    const qs = event.queryStringParameters || {};
+    const { next_cursor, prev_cursor, limit, search, date_start, date_end, status } = qs;
+
+    const params = { access_token: ACCESS_KEY, timestamp, sign: signature };
+    if (next_cursor) params.next_cursor = next_cursor;
+    if (prev_cursor) params.prev_cursor = prev_cursor;
+    if (limit) params.limit = limit;
+    if (search) params.search = search;
+    if (date_start) params.date_start = date_start;
+    if (date_end) params.date_end = date_end;
+    if (status) params.status = status;
+
+    const apiRes = await axios.get(url, { params });
+    return {
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ success: true, data: apiRes.data?.data || {} })
+    };
+  } catch (e) {
+    return { statusCode: 500, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ success: false, error: String(e.message || e) }) };
+  }
+}
+
+

@@ -28,6 +28,36 @@
   status = 200
   force = true
 
+[[redirects]]
+  from = "/api/transactions"
+  to = "/.netlify/functions/transactions"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/transactions/summary"
+  to = "/.netlify/functions/transactions-summary"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/balance"
+  to = "/.netlify/functions/balance"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/balance/histories"
+  to = "/.netlify/functions/balance-histories"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/balance/summary"
+  to = "/.netlify/functions/balance-summary"
+  status = 200
+  force = true
+
 # SPA fallback
 [[redirects]]
   from = "/*"

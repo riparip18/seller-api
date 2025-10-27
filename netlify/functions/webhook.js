@@ -10,7 +10,7 @@ function generateSignature(pathStr) {
 	return { signature, timestamp };
 }
 
-async function getTransactionDetailId(trxId) {
+async function getTransactionDetailIds(trxId) {
 	const pathStr = '/rest/transaction/get';
 	const { signature, timestamp } = generateSignature(pathStr);
 	const url = `${BASE_URL}${pathStr}`;
@@ -24,9 +24,9 @@ async function getTransactionDetailId(trxId) {
 			}
 		});
 		const items = res.data?.data?.items || [];
-		return items.length > 0 ? items[0]?.id : null;
+		return items.map((it) => it?.id).filter(Boolean);
 	} catch (_) {
-		return null;
+		return [];
 	}
 }
 
@@ -69,11 +69,15 @@ exports.handler = async function handler(event) {
 		}
 		if (payload.message_type === 2) {
 			const trxId = payload.data?.transaction_id;
-			const detailId = await getTransactionDetailId(trxId);
-			if (!detailId) return { statusCode: 404, body: JSON.stringify({ error: 'transaction_detail_id tidak ditemukan' }) };
-			const success = await processTransaction(detailId);
-			if (success) return { statusCode: 200, body: JSON.stringify({ status: 'Transaksi berhasil diproses' }) };
-			return { statusCode: 500, body: JSON.stringify({ error: 'Gagal memproses transaksi' }) };
+			const detailIds = await getTransactionDetailIds(trxId);
+			if (!detailIds || detailIds.length === 0) return { statusCode: 404, body: JSON.stringify({ error: 'transaction_detail_id tidak ditemukan' }) };
+			let failed = 0;
+			for (const id of detailIds) {
+				const ok = await processTransaction(id);
+				if (!ok) failed++;
+			}
+			if (failed === 0) return { statusCode: 200, body: JSON.stringify({ status: 'Semua transaksi berhasil diproses', processed: detailIds.length }) };
+			return { statusCode: 500, body: JSON.stringify({ error: 'Sebagian transaksi gagal diproses', processed: detailIds.length - failed, failed }) };
 		}
 		return { statusCode: 200, body: JSON.stringify({ status: 'Diabaikan (bukan transaksi)' }) };
 	} catch (e) {

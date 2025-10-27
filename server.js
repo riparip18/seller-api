@@ -159,6 +159,162 @@ app.all('/webhook', async (req, res) => {
 	}
 });
 
+// ===== VC Gamers Transaction APIs (proxy) =====
+app.get('/api/transactions', async (req, res) => {
+    try {
+        const pathStr = '/rest/transaction/all';
+        const { signature, timestamp } = generateSignature(pathStr);
+        const url = `${BASE_URL}${pathStr}`;
+
+        const {
+            next_cursor,
+            prev_cursor,
+            limit,
+            search,
+            date_start,
+            date_end,
+            status
+        } = req.query || {};
+
+        const params = {
+            access_token: ACCESS_KEY,
+            timestamp,
+            sign: signature,
+        };
+        if (next_cursor) params.next_cursor = next_cursor;
+        if (prev_cursor) params.prev_cursor = prev_cursor;
+        if (limit) params.limit = limit;
+        if (search) params.search = search;
+        if (date_start) params.date_start = date_start;
+        if (date_end) params.date_end = date_end;
+        if (status) params.status = status;
+
+        const apiRes = await axios.get(url, { params });
+        return res.status(200).json({ success: true, data: apiRes.data?.data || {} });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e.message || e) });
+    }
+});
+
+app.get('/api/transactions/summary', async (req, res) => {
+    try {
+        const pathStr = '/rest/transaction/all';
+        const { signature, timestamp } = generateSignature(pathStr);
+        const url = `${BASE_URL}${pathStr}`;
+
+        const { date_start, date_end, status, limit = 100 } = req.query || {};
+
+        const params = {
+            access_token: ACCESS_KEY,
+            timestamp,
+            sign: signature,
+            limit
+        };
+        if (date_start) params.date_start = date_start;
+        if (date_end) params.date_end = date_end;
+        if (status) params.status = status;
+
+        let pendapatanTotal = 0;
+        let potonganTotal = 0;
+        let nextCursor = undefined;
+
+        // Fetch pages until no next_cursor
+        for (let i = 0; i < 10; i++) { // safety cap
+            const apiRes = await axios.get(url, { params: { ...params, next_cursor: nextCursor } });
+            const payload = apiRes.data?.data || {};
+            const items = payload.items || [];
+
+            for (const item of items) {
+                const income = Number(item?.amount) || 0; // gross income from API field
+                const fee = Number(item?.fee || item?.platform_fee || item?.service_fee || 0);
+                pendapatanTotal += income;
+                potonganTotal += fee;
+            }
+
+            const cursor = payload.next_cursor;
+            if (!cursor) break;
+            nextCursor = cursor;
+        }
+
+        const labaBersih = pendapatanTotal - potonganTotal;
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                pendapatan: pendapatanTotal,
+                potongan: potonganTotal,
+                laba_bersih: labaBersih
+            }
+        });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e.message || e) });
+    }
+});
+
+// ===== Balance APIs =====
+app.get('/api/balance', async (req, res) => {
+    try {
+        const pathStr = '/rest/balance/get';
+        const { signature, timestamp } = generateSignature(pathStr);
+        const url = `${BASE_URL}${pathStr}`;
+        const params = { access_token: ACCESS_KEY, timestamp, sign: signature };
+        const apiRes = await axios.get(url, { params });
+        return res.status(200).json({ success: true, data: apiRes.data?.data || {} });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e.message || e) });
+    }
+});
+
+app.get('/api/balance/histories', async (req, res) => {
+    try {
+        const pathStr = '/rest/balance/histories';
+        const { signature, timestamp } = generateSignature(pathStr);
+        const url = `${BASE_URL}${pathStr}`;
+        const { next_cursor, prev_cursor, limit = 50, search } = req.query || {};
+        const params = { access_token: ACCESS_KEY, timestamp, sign: signature, limit };
+        if (next_cursor) params.next_cursor = next_cursor;
+        if (prev_cursor) params.prev_cursor = prev_cursor;
+        if (search) params.search = search;
+        const apiRes = await axios.get(url, { params });
+        return res.status(200).json({ success: true, data: apiRes.data?.data || {} });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e.message || e) });
+    }
+});
+
+app.get('/api/balance/summary', async (req, res) => {
+    try {
+        const pathStr = '/rest/balance/histories';
+        const { signature, timestamp } = generateSignature(pathStr);
+        const url = `${BASE_URL}${pathStr}`;
+        const { limit = 100, search } = req.query || {};
+        const baseParams = { access_token: ACCESS_KEY, timestamp, sign: signature, limit };
+        if (search) baseParams.search = search;
+
+        let pendapatanTotal = 0;
+        let potonganTotal = 0;
+        let nextCursor;
+
+        for (let i = 0; i < 10; i++) {
+            const params = nextCursor ? { ...baseParams, next_cursor: nextCursor } : baseParams;
+            const apiRes = await axios.get(url, { params });
+            const payload = apiRes.data?.data || {};
+            const items = payload.items || [];
+            for (const item of items) {
+                const amount = Number(item?.amount) || 0;
+                if (amount >= 0) pendapatanTotal += amount; else potonganTotal += Math.abs(amount);
+            }
+            nextCursor = payload.next_cursor;
+            if (!nextCursor) break;
+        }
+
+        const labaBersih = pendapatanTotal - potonganTotal;
+        return res.status(200).json({ success: true, data: { pendapatan: pendapatanTotal, potongan: potonganTotal, laba_bersih: labaBersih } });
+    } catch (e) {
+        return res.status(500).json({ success: false, error: String(e.message || e) });
+    }
+});
+
 async function getTransactionDetailId(trxId) {
 	const pathStr = '/rest/transaction/get';
 	const { signature, timestamp } = generateSignature(pathStr);
