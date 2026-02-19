@@ -65,3 +65,44 @@ params = {
 - The `timestamp` must be in UTC and formatted as `YYYYMMDDHHMM`.
 - The signature is valid only for a short period (typically 1 minute).
 - Always use the exact path string as required by the API. 
+
+## Environment Setup (Staging vs Production)
+
+This repo now supports environment variable overrides for base URL and credentials via `config.js`.
+
+Supported variables:
+
+- `VC_BASE_URL` (e.g., `https://apis.vcg.my.id` for staging, `https://apis.vcgamers.com` for production)
+- `VC_ACCESS_KEY`
+- `VC_SECRET_KEY`
+- `NGROK_STATIC_DOMAIN` (optional)
+
+### Local (Windows PowerShell)
+
+Set variables for the current session and start the server:
+
+```powershell
+# Example: switch to Production
+$env:VC_BASE_URL = "https://apis.vcgamers.com"
+$env:VC_ACCESS_KEY = "<your_prod_access_key>"
+$env:VC_SECRET_KEY = "<your_prod_secret_key>"
+npm start
+```
+
+Or create a `.env` file from the template and run:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env with your keys
+npm start
+```
+
+### Netlify (Functions)
+
+Set the same environment variables in your site settings:
+
+- Site settings → Build & deploy → Environment → Environment variables
+- Add `VC_BASE_URL`, `VC_ACCESS_KEY`, `VC_SECRET_KEY`
+- Redeploy the site
+
+All server routes and Netlify Functions import `BASE_URL`, `ACCESS_KEY`, and `SECRET_KEY` from `config.js`, so switching envs does not require code changes.

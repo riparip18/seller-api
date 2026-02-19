@@ -60,7 +60,7 @@
 
     <script type="text/babel" data-presets="env,react" data-plugins="proposal-optional-chaining">
         const { useState, useEffect } = React;
-        const { Button, Typography, message, DatePicker, Card, Statistic, Space, Tabs, Radio } = antd;
+        const { Button, Typography, message, DatePicker, Card, Statistic, Space, Tabs, Radio, Select, Table, Spin, Divider } = antd;
         const { Text, Title } = Typography;
 
         function App() {
@@ -136,6 +136,63 @@
                 }
             };
 
+            // ===== Product discovery state =====
+            const [categories, setCategories] = useState([]);
+            const [brands, setBrands] = useState([]);
+            const [groups, setGroups] = useState([]);
+            const [variations, setVariations] = useState([]);
+            const [catId, setCatId] = useState(undefined);
+            const [brandId, setBrandId] = useState(undefined);
+            const [groupId, setGroupId] = useState(undefined);
+            const [prodLoading, setProdLoading] = useState(false);
+
+            const getJSON = async (url) => {
+                const res = await fetch(url);
+                return res.json();
+            };
+
+            const loadCategories = async () => {
+                setProdLoading(true);
+                try {
+                    const data = await getJSON('/api/product/categories');
+                    if (data.success) setCategories(data.data || []); else message.error('Gagal ambil kategori');
+                } catch (_) { message.error('Koneksi gagal'); }
+                finally { setProdLoading(false); }
+            };
+            const loadBrands = async (category_id) => {
+                if (!category_id) return;
+                setProdLoading(true);
+                try {
+                    const data = await getJSON(`/api/product/brands?category_id=${encodeURIComponent(category_id)}`);
+                    if (data.success) setBrands(data.data || []); else message.error('Gagal ambil brand');
+                } catch (_) { message.error('Koneksi gagal'); }
+                finally { setProdLoading(false); }
+            };
+            const loadGroups = async (category_id, brand_id) => {
+                if (!category_id || !brand_id) return;
+                setProdLoading(true);
+                try {
+                    const data = await getJSON(`/api/product/groups?category_id=${encodeURIComponent(category_id)}&brand_id=${encodeURIComponent(brand_id)}`);
+                    if (data.success) setGroups(data.data || []); else message.error('Gagal ambil grup');
+                } catch (_) { message.error('Koneksi gagal'); }
+                finally { setProdLoading(false); }
+            };
+            const loadVariations = async (group_id) => {
+                if (!group_id) return;
+                setProdLoading(true);
+                try {
+                    const data = await getJSON(`/api/product/variation-masters?group_id=${encodeURIComponent(group_id)}`);
+                    if (data.success) setVariations(data.data || []); else message.error('Gagal ambil variasi');
+                } catch (_) { message.error('Koneksi gagal'); }
+                finally { setProdLoading(false); }
+            };
+
+            // On-demand loading: user triggers fetch with buttons.
+            // Clear dependent data when upstream selection changes.
+            useEffect(() => { setBrands([]); setBrandId(undefined); setGroups([]); setGroupId(undefined); setVariations([]); }, [catId]);
+            useEffect(() => { setGroups([]); setGroupId(undefined); setVariations([]); }, [brandId]);
+            useEffect(() => { setVariations([]); }, [groupId]);
+
             return (
                 <div className="container">
                     <div className="panel">
@@ -206,8 +263,92 @@
                                         </Space>
                                     </Space>
                                 </div>
-                              )
-                            }
+                                                            )
+                                                        },
+                                                        {
+                                                            key: 'produk',
+                                                            label: 'Produk',
+                                                            children: (
+                                                                <div>
+                                                                    <Space direction="vertical" size="large" style={{ width: '100%', textAlign: 'left' }}>
+                                                                        <Space wrap>
+                                                                            <div>
+                                                                                <Text strong>Kategori</Text>
+                                                                                <Space>
+                                                                                    <Select
+                                                                                        style={{ minWidth: 260 }}
+                                                                                        placeholder="Pilih kategori"
+                                                                                        value={catId}
+                                                                                        onChange={setCatId}
+                                                                                        loading={prodLoading}
+                                                                                        options={(categories || []).map(c => ({ label: c.name, value: c.id }))}
+                                                                                        showSearch
+                                                                                        optionFilterProp="label"
+                                                                                    />
+                                                                                    <Button onClick={loadCategories} loading={prodLoading}>Muat Kategori</Button>
+                                                                                </Space>
+                                                                            </div>
+                                                                            <div>
+                                                                                <Text strong>Brand</Text>
+                                                                                <Space>
+                                                                                    <Select
+                                                                                        style={{ minWidth: 260 }}
+                                                                                        placeholder="Pilih brand"
+                                                                                        value={brandId}
+                                                                                        onChange={setBrandId}
+                                                                                        disabled={!catId}
+                                                                                        loading={prodLoading}
+                                                                                        options={(brands || []).map(b => ({ label: b.name, value: b.id }))}
+                                                                                        showSearch
+                                                                                        optionFilterProp="label"
+                                                                                    />
+                                                                                    <Button onClick={() => loadBrands(catId)} disabled={!catId} loading={prodLoading}>Muat Brand</Button>
+                                                                                </Space>
+                                                                            </div>
+                                                                            <div>
+                                                                                <Text strong>Group</Text>
+                                                                                <Space>
+                                                                                    <Select
+                                                                                        style={{ minWidth: 260 }}
+                                                                                        placeholder="Pilih group"
+                                                                                        value={groupId}
+                                                                                        onChange={setGroupId}
+                                                                                        disabled={!brandId}
+                                                                                        loading={prodLoading}
+                                                                                        options={(groups || []).map(g => ({ label: g.name, value: g.id }))}
+                                                                                        showSearch
+                                                                                        optionFilterProp="label"
+                                                                                    />
+                                                                                    <Button onClick={() => loadGroups(catId, brandId)} disabled={!brandId} loading={prodLoading}>Muat Group</Button>
+                                                                                </Space>
+                                                                            </div>
+                                                                        </Space>
+                                                                        <Divider style={{ margin: '8px 0' }} />
+                                                                        <div>
+                                                                            <Text type="secondary">Variation Masters</Text>
+                                                                            <div style={{ marginTop: 8 }}>
+                                                                                <Space style={{ marginBottom: 8 }}>
+                                                                                    <Button type="primary" onClick={() => loadVariations(groupId)} disabled={!groupId} loading={prodLoading}>Muat Variasi</Button>
+                                                                                </Space>
+                                                                                {prodLoading && variations.length === 0 ? (<Spin />) : (
+                                                                                    <Table
+                                                                                        dataSource={(variations || []).map((v, idx) => ({ key: v.id || idx, ...v }))}
+                                                                                        size="small"
+                                                                                        pagination={{ pageSize: 10 }}
+                                                                                        columns={[
+                                                                                            { title: 'ID', dataIndex: 'id', key: 'id', width: 320 },
+                                                                                            { title: 'Nama', dataIndex: 'name', key: 'name' },
+                                                                                            { title: 'Wajib', dataIndex: 'is_required', key: 'is_required', render: (v) => v ? 'Ya' : 'Tidak', width: 100 },
+                                                                                            { title: 'Aktif', dataIndex: 'is_active', key: 'is_active', render: (v) => v ? 'Ya' : 'Tidak', width: 100 },
+                                                                                        ]}
+                                                                                    />
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    </Space>
+                                                                </div>
+                                                            )
+                                                        }
                           ]}
                         />
                     </div>

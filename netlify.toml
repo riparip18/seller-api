@@ -58,6 +58,31 @@
   status = 200
   force = true
 
+# Product APIs
+[[redirects]]
+  from = "/api/product/categories"
+  to = "/.netlify/functions/product-categories"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/product/brands"
+  to = "/.netlify/functions/product-brands"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/product/groups"
+  to = "/.netlify/functions/product-groups"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/product/variation-masters"
+  to = "/.netlify/functions/product-variation-masters"
+  status = 200
+  force = true
+
 # SPA fallback
 [[redirects]]
   from = "/*"
