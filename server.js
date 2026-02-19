@@ -10,6 +10,7 @@ const { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN } = require('./con
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const API_TIMEOUT = 10000; // 10s timeout for upstream API
 
 // Middleware
 app.use(cors());
@@ -143,7 +144,10 @@ app.all('/webhook', async (req, res) => {
 		}
 		if (payload.message_type === 2) {
 			const trxId = payload.data?.transaction_id;
+			console.log('[webhook] message_type=2, trxId:', trxId, '| payload.data:', JSON.stringify(payload.data));
+			if (!trxId) return res.status(400).json({ error: 'transaction_id tidak ada di payload' });
 			const detailId = await getTransactionDetailId(trxId);
+			console.log('[webhook] detailId result:', detailId);
 			if (!detailId) return res.status(404).json({ error: 'transaction_detail_id tidak ditemukan' });
 			if (processedIds.has(detailId)) return res.status(204).send('');
 			const success = await processTransaction(detailId);
@@ -315,6 +319,128 @@ app.get('/api/balance/summary', async (req, res) => {
     }
 });
 
+// ===== Product APIs =====
+// Simple in-memory cache for product lookups (local-only convenience)
+const productCache = new Map();
+function cacheKey(pathStr, params) {
+	const ordered = Object.keys(params || {}).sort().reduce((acc, k) => { acc[k] = params[k]; return acc; }, {});
+	return `${pathStr}|${JSON.stringify(ordered)}`;
+}
+function getFromCache(pathStr, params, ttlMs) {
+	const key = cacheKey(pathStr, params);
+	const entry = productCache.get(key);
+	if (!entry) return { hit: false, data: null };
+	const isFresh = (Date.now() - entry.ts) < ttlMs;
+	if (!isFresh) { productCache.delete(key); return { hit: false, data: null }; }
+	return { hit: true, data: entry.data };
+}
+function setCache(pathStr, params, data) {
+	const key = cacheKey(pathStr, params);
+	productCache.set(key, { ts: Date.now(), data });
+}
+
+app.get('/api/product/categories', async (req, res) => {
+	try {
+		const pathStr = '/rest/product/categories';
+		const baseParams = { access_token: ACCESS_KEY };
+		const cached = getFromCache(pathStr, baseParams, 5 * 60 * 1000); // 5 minutes
+		if (cached.hit) {
+			res.set('x-cache', 'HIT');
+			return res.status(200).json({ success: true, data: cached.data });
+		}
+		const { signature, timestamp } = generateSignature(pathStr);
+		const url = `${BASE_URL}${pathStr}`;
+		const params = { access_token: ACCESS_KEY, timestamp, sign: signature };
+		const apiRes = await axios.get(url, { params, timeout: API_TIMEOUT });
+		const data = apiRes.data?.data || [];
+		setCache(pathStr, baseParams, data);
+		res.set('x-cache', 'MISS');
+		return res.status(200).json({ success: true, data });
+	} catch (e) {
+		return res.status(500).json({ success: false, error: String(e.message || e) });
+	}
+});
+
+app.get('/api/product/brands', async (req, res) => {
+	try {
+		const { category_id } = req.query || {};
+		if (!category_id) return res.status(400).json({ success: false, error: 'Missing required parameter: category_id' });
+		const pathStr = '/rest/product/brands';
+		const baseParams = { access_token: ACCESS_KEY, category_id };
+		const cached = getFromCache(pathStr, baseParams, 5 * 60 * 1000);
+		if (cached.hit) {
+			res.set('x-cache', 'HIT');
+			return res.status(200).json({ success: true, data: cached.data });
+		}
+		const { signature, timestamp } = generateSignature(pathStr);
+		const url = `${BASE_URL}${pathStr}`;
+		const params = { access_token: ACCESS_KEY, timestamp, sign: signature, category_id };
+		const apiRes = await axios.get(url, { params, timeout: API_TIMEOUT });
+		const data = apiRes.data?.data || [];
+		setCache(pathStr, baseParams, data);
+		res.set('x-cache', 'MISS');
+		return res.status(200).json({ success: true, data });
+	} catch (e) {
+		return res.status(500).json({ success: false, error: String(e.message || e) });
+	}
+});
+
+app.get('/api/product/groups', async (req, res) => {
+	try {
+		const { category_id, brand_id } = req.query || {};
+		if (!category_id) return res.status(400).json({ success: false, error: 'Missing required parameter: category_id' });
+		if (!brand_id) return res.status(400).json({ success: false, error: 'Missing required parameter: brand_id' });
+		const pathStr = '/rest/product/groups';
+		const baseParams = { access_token: ACCESS_KEY, category_id, brand_id };
+		const cached = getFromCache(pathStr, baseParams, 5 * 60 * 1000);
+		if (cached.hit) {
+			res.set('x-cache', 'HIT');
+			return res.status(200).json({ success: true, data: cached.data });
+		}
+		const { signature, timestamp } = generateSignature(pathStr);
+		const url = `${BASE_URL}${pathStr}`;
+		const params = { access_token: ACCESS_KEY, timestamp, sign: signature, category_id, brand_id };
+		const apiRes = await axios.get(url, { params, timeout: API_TIMEOUT });
+		const data = apiRes.data?.data || [];
+		setCache(pathStr, baseParams, data);
+		res.set('x-cache', 'MISS');
+		return res.status(200).json({ success: true, data });
+	} catch (e) {
+		return res.status(500).json({ success: false, error: String(e.message || e) });
+	}
+});
+app.get('/api/product/variation-masters', async (req, res) => {
+	try {
+		const { group_id } = req.query || {};
+		if (!group_id) {
+			return res.status(400).json({ success: false, error: 'Missing required parameter: group_id' });
+		}
+		const pathStr = '/rest/product/variation-masters';
+		const baseParams = { access_token: ACCESS_KEY, group_id };
+		const cached = getFromCache(pathStr, baseParams, 2 * 60 * 1000); // 2 minutes
+		if (cached.hit) {
+			res.set('x-cache', 'HIT');
+			return res.status(200).json({ success: true, data: cached.data });
+		}
+		const { signature, timestamp } = generateSignature(pathStr);
+		const url = `${BASE_URL}${pathStr}`;
+		const params = { access_token: ACCESS_KEY, timestamp, sign: signature, group_id };
+		const apiRes = await axios.get(url, { params, timeout: API_TIMEOUT });
+		const data = apiRes.data?.data || [];
+		setCache(pathStr, baseParams, data);
+		res.set('x-cache', 'MISS');
+		return res.status(200).json({ success: true, data });
+	} catch (e) {
+		return res.status(500).json({ success: false, error: String(e.message || e) });
+	}
+});
+
+// Utility to clear product cache (dev helper)
+app.post('/api/product/cache/clear', (req, res) => {
+	productCache.clear();
+	res.json({ success: true, message: 'Product cache cleared' });
+});
+
 async function getTransactionDetailId(trxId) {
 	const pathStr = '/rest/transaction/get';
 	const { signature, timestamp } = generateSignature(pathStr);
@@ -328,9 +454,27 @@ async function getTransactionDetailId(trxId) {
 				transaction_id: trxId
 			}
 		});
-		const items = res.data?.data?.items || [];
-		return items.length > 0 ? items[0]?.id : null;
-	} catch (_) {
+		console.log('[getTransactionDetailId] raw response:', JSON.stringify(res.data));
+		// Coba beberapa kemungkinan struktur response
+		const data = res.data?.data;
+		// Kemungkinan 1: data.items[] dengan field id
+		if (Array.isArray(data?.items) && data.items.length > 0) {
+			const id = data.items[0]?.id ?? data.items[0]?.detail_id ?? data.items[0]?.transaction_detail_id;
+			console.log('[getTransactionDetailId] found via items[0]:', id);
+			return id || null;
+		}
+		// Kemungkinan 2: data langsung object (bukan array)
+		if (data && !Array.isArray(data)) {
+			const id = data.id ?? data.detail_id ?? data.transaction_detail_id;
+			if (id) {
+				console.log('[getTransactionDetailId] found via data object:', id);
+				return id;
+			}
+		}
+		console.log('[getTransactionDetailId] tidak ditemukan dari response:', JSON.stringify(data));
+		return null;
+	} catch (err) {
+		console.error('[getTransactionDetailId] error:', err.message, err.response?.data);
 		return null;
 	}
 }
