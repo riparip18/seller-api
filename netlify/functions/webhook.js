@@ -10,6 +10,11 @@ function generateSignature(pathStr) {
 	return { signature, timestamp };
 }
 
+// Ambil ID dari sebuah item — coba berbagai kemungkinan nama field
+function extractId(item) {
+	return item?.id ?? item?.detail_id ?? item?.transaction_detail_id ?? item?.trx_detail_id ?? null;
+}
+
 async function getTransactionDetailIds(trxId) {
 	const pathStr = '/rest/transaction/get';
 	const { signature, timestamp } = generateSignature(pathStr);
@@ -23,9 +28,45 @@ async function getTransactionDetailIds(trxId) {
 				transaction_id: trxId
 			}
 		});
-		const items = res.data?.data?.items || [];
-		return items.map((it) => it?.id).filter(Boolean);
-	} catch (_) {
+
+		console.log('[webhook] getTransactionDetailIds raw response:', JSON.stringify(res.data));
+
+		const data = res.data?.data;
+
+		// Kemungkinan 1: data.items adalah array
+		if (Array.isArray(data?.items) && data.items.length > 0) {
+			const ids = data.items.map(extractId).filter(Boolean);
+			console.log('[webhook] found ids via data.items:', ids);
+			return ids;
+		}
+
+		// Kemungkinan 2: data sendiri adalah array
+		if (Array.isArray(data) && data.length > 0) {
+			const ids = data.map(extractId).filter(Boolean);
+			console.log('[webhook] found ids via data[]:', ids);
+			return ids;
+		}
+
+		// Kemungkinan 3: data langsung satu object
+		if (data && typeof data === 'object' && !Array.isArray(data)) {
+			const id = extractId(data);
+			if (id) {
+				console.log('[webhook] found id via data object:', id);
+				return [id];
+			}
+		}
+
+		// Kemungkinan 4: root level res.data langsung punya items
+		if (Array.isArray(res.data?.items) && res.data.items.length > 0) {
+			const ids = res.data.items.map(extractId).filter(Boolean);
+			console.log('[webhook] found ids via res.data.items:', ids);
+			return ids;
+		}
+
+		console.log('[webhook] transaction_detail_id tidak ditemukan. data:', JSON.stringify(data));
+		return [];
+	} catch (err) {
+		console.error('[webhook] getTransactionDetailIds error:', err.message, err.response?.data);
 		return [];
 	}
 }
@@ -44,7 +85,8 @@ async function processTransaction(detailId) {
 			}
 		});
 		return res.status >= 200 && res.status < 300;
-	} catch (_) {
+	} catch (err) {
+		console.error('[webhook] processTransaction error:', err.message, err.response?.data);
 		return false;
 	}
 }
@@ -67,10 +109,27 @@ exports.handler = async function handler(event) {
 		if (!payload || Object.keys(payload).length === 0) {
 			return { statusCode: 400, body: JSON.stringify({ error: 'Payload kosong' }) };
 		}
+
+		console.log('[webhook] incoming payload:', JSON.stringify(payload));
+
 		if (payload.message_type === 2) {
-			const trxId = payload.data?.transaction_id;
+			// Coba berbagai kemungkinan field name untuk transaction_id di payload
+			const trxId = payload.data?.transaction_id
+				?? payload.data?.trx_id
+				?? payload.transaction_id
+				?? payload.trx_id;
+
+			console.log('[webhook] message_type=2, trxId:', trxId);
+
+			if (!trxId) {
+				return { statusCode: 400, body: JSON.stringify({ error: 'transaction_id tidak ada di payload', payload_data: payload.data }) };
+			}
+
 			const detailIds = await getTransactionDetailIds(trxId);
-			if (!detailIds || detailIds.length === 0) return { statusCode: 404, body: JSON.stringify({ error: 'transaction_detail_id tidak ditemukan' }) };
+			if (!detailIds || detailIds.length === 0) {
+				return { statusCode: 404, body: JSON.stringify({ error: 'transaction_detail_id tidak ditemukan', trxId }) };
+			}
+
 			let failed = 0;
 			for (const id of detailIds) {
 				const ok = await processTransaction(id);
@@ -79,7 +138,8 @@ exports.handler = async function handler(event) {
 			if (failed === 0) return { statusCode: 200, body: JSON.stringify({ status: 'Semua transaksi berhasil diproses', processed: detailIds.length }) };
 			return { statusCode: 500, body: JSON.stringify({ error: 'Sebagian transaksi gagal diproses', processed: detailIds.length - failed, failed }) };
 		}
-		return { statusCode: 200, body: JSON.stringify({ status: 'Diabaikan (bukan transaksi)' }) };
+
+		return { statusCode: 200, body: JSON.stringify({ status: 'Diabaikan (bukan transaksi)', message_type: payload.message_type }) };
 	} catch (e) {
 		return { statusCode: 500, body: JSON.stringify({ error: String(e.message || e) }) };
 	}
