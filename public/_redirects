@@ -9,5 +9,11 @@
 /api/balance/histories /.netlify/functions/balance-histories 200
 /api/balance/summary /.netlify/functions/balance-summary 200
 
+# Product APIs
+/api/product/categories /.netlify/functions/product-categories 200
+/api/product/brands /.netlify/functions/product-brands 200
+/api/product/groups /.netlify/functions/product-groups 200
+/api/product/variation-masters /.netlify/functions/product-variation-masters 200
+
 # SPA fallback to index.html
 /* /index.html 200
