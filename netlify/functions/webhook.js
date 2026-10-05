@@ -1,103 +1,14 @@
-const crypto = require('crypto');
-const axios = require('axios');
-const { ACCESS_KEY, SECRET_KEY, BASE_URL } = require('../../config');
+const { deliverTransaction, extractTrxId, toWebhookResponse } = require('../../lib/delivery');
 
-function generateSignature(pathStr) {
-	const timestamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 12);
-	const toSign = `${pathStr}${ACCESS_KEY}${timestamp}`;
-	const hmac = crypto.createHmac('sha512', SECRET_KEY).update(toSign, 'utf8').digest('hex');
-	const signature = Buffer.from(hmac, 'utf8').toString('base64');
-	return { signature, timestamp };
-}
-
-// Ambil ID dari sebuah item — coba berbagai kemungkinan nama field
-function extractId(item) {
-	return item?.id ?? item?.detail_id ?? item?.transaction_detail_id ?? item?.trx_detail_id ?? null;
-}
-
-async function getTransactionDetailIds(trxId) {
-	const pathStr = '/rest/transaction/get';
-	const { signature, timestamp } = generateSignature(pathStr);
-	const url = `${BASE_URL}${pathStr}`;
-	try {
-		const res = await axios.get(url, {
-			params: {
-				access_token: ACCESS_KEY,
-				timestamp,
-				sign: signature,
-				transaction_id: trxId
-			}
-		});
-
-		console.log('[webhook] getTransactionDetailIds raw response:', JSON.stringify(res.data));
-
-		const data = res.data?.data;
-
-		// Kemungkinan 1: data.items adalah array
-		if (Array.isArray(data?.items) && data.items.length > 0) {
-			const ids = data.items.map(extractId).filter(Boolean);
-			console.log('[webhook] found ids via data.items:', ids);
-			return ids;
-		}
-
-		// Kemungkinan 2: data sendiri adalah array
-		if (Array.isArray(data) && data.length > 0) {
-			const ids = data.map(extractId).filter(Boolean);
-			console.log('[webhook] found ids via data[]:', ids);
-			return ids;
-		}
-
-		// Kemungkinan 3: data langsung satu object
-		if (data && typeof data === 'object' && !Array.isArray(data)) {
-			const id = extractId(data);
-			if (id) {
-				console.log('[webhook] found id via data object:', id);
-				return [id];
-			}
-		}
-
-		// Kemungkinan 4: root level res.data langsung punya items
-		if (Array.isArray(res.data?.items) && res.data.items.length > 0) {
-			const ids = res.data.items.map(extractId).filter(Boolean);
-			console.log('[webhook] found ids via res.data.items:', ids);
-			return ids;
-		}
-
-		console.log('[webhook] transaction_detail_id tidak ditemukan. data:', JSON.stringify(data));
-		return [];
-	} catch (err) {
-		console.error('[webhook] getTransactionDetailIds error:', err.message, err.response?.data);
-		return [];
-	}
-}
-
-async function processTransaction(detailId) {
-	const pathStr = '/rest/transaction/process';
-	const { signature, timestamp } = generateSignature(pathStr);
-	const url = `${BASE_URL}${pathStr}`;
-	try {
-		const res = await axios.post(url, { delivery_data: ['Transaksi berhasil diproses'] }, {
-			params: {
-				access_token: ACCESS_KEY,
-				timestamp,
-				sign: signature,
-				transaction_detail_id: detailId
-			}
-		});
-		return res.status >= 200 && res.status < 300;
-	} catch (err) {
-		console.error('[webhook] processTransaction error:', err.message, err.response?.data);
-		return false;
-	}
-}
+const json = (statusCode, body) => ({
+	statusCode,
+	headers: { 'content-type': 'application/json' },
+	body: body ? JSON.stringify(body) : '',
+});
 
 exports.handler = async function handler(event) {
 	if (event.httpMethod === 'GET') {
-		return {
-			statusCode: 200,
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ message: 'Endpoint webhook tersedia' })
-		};
+		return json(200, { message: 'Endpoint webhook tersedia' });
 	}
 
 	if (event.httpMethod !== 'POST') {
@@ -107,40 +18,25 @@ exports.handler = async function handler(event) {
 	try {
 		const payload = event.body ? JSON.parse(event.body) : {};
 		if (!payload || Object.keys(payload).length === 0) {
-			return { statusCode: 400, body: JSON.stringify({ error: 'Payload kosong' }) };
+			return json(400, { error: 'Payload kosong' });
 		}
 
 		console.log('[webhook] incoming payload:', JSON.stringify(payload));
 
 		if (payload.message_type === 2) {
-			// Coba berbagai kemungkinan field name untuk transaction_id di payload
-			const trxId = payload.data?.transaction_id
-				?? payload.data?.trx_id
-				?? payload.transaction_id
-				?? payload.trx_id;
-
-			console.log('[webhook] message_type=2, trxId:', trxId);
-
+			const trxId = extractTrxId(payload);
 			if (!trxId) {
-				return { statusCode: 400, body: JSON.stringify({ error: 'transaction_id tidak ada di payload', payload_data: payload.data }) };
+				return json(400, { error: 'transaction_id tidak ada di payload', payload_data: payload.data });
 			}
 
-			const detailIds = await getTransactionDetailIds(trxId);
-			if (!detailIds || detailIds.length === 0) {
-				return { statusCode: 404, body: JSON.stringify({ error: 'transaction_detail_id tidak ditemukan', trxId }) };
-			}
-
-			let failed = 0;
-			for (const id of detailIds) {
-				const ok = await processTransaction(id);
-				if (!ok) failed++;
-			}
-			if (failed === 0) return { statusCode: 200, body: JSON.stringify({ status: 'Semua transaksi berhasil diproses', processed: detailIds.length }) };
-			return { statusCode: 500, body: JSON.stringify({ error: 'Sebagian transaksi gagal diproses', processed: detailIds.length - failed, failed }) };
+			const result = await deliverTransaction(trxId);
+			console.log('[webhook] trxId:', trxId, '| processed:', result.processed, '| skipped:', result.skipped, '| failed:', result.failed.map(f => f.id));
+			const { status, body } = toWebhookResponse(result);
+			return json(status, body);
 		}
 
-		return { statusCode: 200, body: JSON.stringify({ status: 'Diabaikan (bukan transaksi)', message_type: payload.message_type }) };
+		return json(200, { status: 'Diabaikan (bukan transaksi)', message_type: payload.message_type });
 	} catch (e) {
-		return { statusCode: 500, body: JSON.stringify({ error: String(e.message || e) }) };
+		return json(500, { error: String(e.message || e) });
 	}
 }

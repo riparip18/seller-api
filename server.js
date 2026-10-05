@@ -7,6 +7,7 @@ const axios = require('axios');
 const fs = require('fs');
 
 const { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN } = require('./config');
+const { deliverTransaction, extractTrxId, toWebhookResponse } = require('./lib/delivery');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,8 +28,6 @@ let serviceState = {
 	last_check: new Date(),
 	controls_enabled: process.env.ENABLE_CONTROLS !== 'false'
 };
-
-const processedIds = new Set();
 
 // ===== Helpers =====
 function generateSignature(pathStr) {
@@ -143,19 +142,12 @@ app.all('/webhook', async (req, res) => {
 			return res.status(400).json({ error: 'Payload kosong' });
 		}
 		if (payload.message_type === 2) {
-			const trxId = payload.data?.transaction_id;
-			console.log('[webhook] message_type=2, trxId:', trxId, '| payload.data:', JSON.stringify(payload.data));
+			const trxId = extractTrxId(payload);
 			if (!trxId) return res.status(400).json({ error: 'transaction_id tidak ada di payload' });
-			const detailId = await getTransactionDetailId(trxId);
-			console.log('[webhook] detailId result:', detailId);
-			if (!detailId) return res.status(404).json({ error: 'transaction_detail_id tidak ditemukan' });
-			if (processedIds.has(detailId)) return res.status(204).send('');
-			const success = await processTransaction(detailId);
-			if (success) {
-				processedIds.add(detailId);
-				return res.status(200).json({ status: 'Transaksi berhasil diproses' });
-			}
-			return res.status(500).json({ error: 'Gagal memproses transaksi' });
+			const result = await deliverTransaction(trxId);
+			console.log('[webhook] trxId:', trxId, '| processed:', result.processed, '| skipped:', result.skipped, '| failed:', result.failed.map(f => f.id));
+			const { status, body } = toWebhookResponse(result);
+			return body ? res.status(status).json(body) : res.status(status).send('');
 		}
 		return res.status(200).json({ status: 'Diabaikan (bukan transaksi)' });
 	} catch (e) {
@@ -440,63 +432,6 @@ app.post('/api/product/cache/clear', (req, res) => {
 	productCache.clear();
 	res.json({ success: true, message: 'Product cache cleared' });
 });
-
-async function getTransactionDetailId(trxId) {
-	const pathStr = '/rest/transaction/get';
-	const { signature, timestamp } = generateSignature(pathStr);
-	const url = `${BASE_URL}${pathStr}`;
-	try {
-		const res = await axios.get(url, {
-			params: {
-				access_token: ACCESS_KEY,
-				timestamp,
-				sign: signature,
-				transaction_id: trxId
-			}
-		});
-		console.log('[getTransactionDetailId] raw response:', JSON.stringify(res.data));
-		// Coba beberapa kemungkinan struktur response
-		const data = res.data?.data;
-		// Kemungkinan 1: data.items[] dengan field id
-		if (Array.isArray(data?.items) && data.items.length > 0) {
-			const id = data.items[0]?.id ?? data.items[0]?.detail_id ?? data.items[0]?.transaction_detail_id;
-			console.log('[getTransactionDetailId] found via items[0]:', id);
-			return id || null;
-		}
-		// Kemungkinan 2: data langsung object (bukan array)
-		if (data && !Array.isArray(data)) {
-			const id = data.id ?? data.detail_id ?? data.transaction_detail_id;
-			if (id) {
-				console.log('[getTransactionDetailId] found via data object:', id);
-				return id;
-			}
-		}
-		console.log('[getTransactionDetailId] tidak ditemukan dari response:', JSON.stringify(data));
-		return null;
-	} catch (err) {
-		console.error('[getTransactionDetailId] error:', err.message, err.response?.data);
-		return null;
-	}
-}
-
-async function processTransaction(detailId) {
-	const pathStr = '/rest/transaction/process';
-	const { signature, timestamp } = generateSignature(pathStr);
-	const url = `${BASE_URL}${pathStr}`;
-	try {
-		const res = await axios.post(url, { delivery_data: ['Transaksi berhasil diproses'] }, {
-			params: {
-				access_token: ACCESS_KEY,
-				timestamp,
-				sign: signature,
-				transaction_detail_id: detailId
-			}
-		});
-		return res.status >= 200 && res.status < 300;
-	} catch (_) {
-		return false;
-	}
-}
 
 // ===== Control endpoints for Start/Stop (tunnel only) =====
 app.get('/api/status', async (req, res) => {
