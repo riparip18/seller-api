@@ -145,7 +145,7 @@ app.all('/webhook', async (req, res) => {
 			const trxId = extractTrxId(payload);
 			if (!trxId) return res.status(400).json({ error: 'transaction_id tidak ada di payload' });
 			const result = await deliverTransaction(trxId);
-			console.log('[webhook] trxId:', trxId, '| processed:', result.processed, '| skipped:', result.skipped, '| failed:', result.failed.map(f => f.id));
+			console.log('[webhook] trxId:', trxId, '| account:', result.account, '| processed:', result.processed, '| skipped:', result.skipped, '| failed:', result.failed.map(f => f.id));
 			const { status, body } = toWebhookResponse(result);
 			return body ? res.status(status).json(body) : res.status(status).send('');
 		}

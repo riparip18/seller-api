@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const { createDelivery, extractTrxId } = require('../lib/delivery');
 
 const noSleep = () => Promise.resolve();
+const ONE = [{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' }];
 
 function httpError(status) {
 	const err = new Error(`HTTP ${status}`);
@@ -42,7 +43,7 @@ const itemsResponse = (...ids) => ({ data: { items: ids.map((id) => ({ id })) } 
 
 test('delivers every detail item of a transaction', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1', 'd2', 'd3')] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -55,7 +56,7 @@ test('retries process on connection error, 503 and 502, then succeeds', async ()
 		get: [itemsResponse('d1')],
 		post: { d1: [networkError(), httpError(503), httpError(502), undefined] },
 	});
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep, maxAttempts: 4 });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, maxAttempts: 4 });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -65,7 +66,7 @@ test('retries process on connection error, 503 and 502, then succeeds', async ()
 
 test('does not retry process on 4xx client errors', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [httpError(400)] } });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -77,7 +78,7 @@ test('does not retry process on 4xx client errors', async () => {
 
 test('gives up after max attempts', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [httpError(503)] } });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep, maxAttempts: 3 });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, maxAttempts: 3 });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -87,7 +88,7 @@ test('gives up after max attempts', async () => {
 
 test('retries transaction lookup on transient error', async () => {
 	const client = fakeClient({ get: [networkError(), itemsResponse('d1')] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -97,7 +98,7 @@ test('retries transaction lookup on transient error', async () => {
 
 test('returns empty result when transaction has no detail items', async () => {
 	const client = fakeClient({ get: [{ data: { items: [] } }] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -106,7 +107,7 @@ test('returns empty result when transaction has no detail items', async () => {
 
 test('skips detail ids that were already delivered', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	await deliverTransaction('trx-1');
 	const second = await deliverTransaction('trx-1');
@@ -118,7 +119,7 @@ test('skips detail ids that were already delivered', async () => {
 
 test('concurrent webhooks for the same transaction share one delivery', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const [a, b] = await Promise.all([deliverTransaction('trx-1'), deliverTransaction('trx-1')]);
 
@@ -128,7 +129,7 @@ test('concurrent webhooks for the same transaction share one delivery', async ()
 
 test('failed delivery can be retried by a later webhook', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [httpError(400), undefined] } });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 	const first = await deliverTransaction('trx-1');
 	const second = await deliverTransaction('trx-1');
@@ -149,7 +150,7 @@ test('does not retry process on timeout or 500 (request may already have been ap
 	timeout.code = 'ECONNABORTED';
 	for (const err of [timeout, httpError(500)]) {
 		const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [err, undefined] } });
-		const { deliverTransaction } = createDelivery({ client, sleep: noSleep });
+		const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
 
 		const result = await deliverTransaction('trx-1');
 
@@ -160,7 +161,7 @@ test('does not retry process on timeout or 500 (request may already have been ap
 
 test('stops retrying once the delivery deadline is spent', async () => {
 	const client = fakeClient({ get: [networkError()] });
-	const { deliverTransaction } = createDelivery({ client, sleep: noSleep, deadlineMs: 0 });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, deadlineMs: 0 });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -173,4 +174,48 @@ test('lookup failure maps to 502 without leaking upstream error text', () => {
 	const res = toWebhookResponse({ trxId: 't', lookupFailed: true, detailIds: [], processed: [], skipped: [], failed: [] });
 	assert.strictEqual(res.status, 502);
 	assert.deepStrictEqual(Object.keys(res.body).sort(), ['error', 'trxId']);
+});
+
+test('finds the transaction on whichever account owns it and processes with that account', async () => {
+	const accounts = [
+		{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' },
+		{ name: 'secondary', accessKey: 'AK2', secretKey: 'SK2' },
+	];
+	const posts = [];
+	const client = {
+		get: async (_url, { params }) => ({
+			status: 200,
+			data: params.access_token === 'AK2' ? itemsResponse('d1') : { status_code: '44', message: 'not found' },
+		}),
+		post: async (_url, _body, { params }) => {
+			posts.push(params.access_token);
+			return { status: 200, data: {} };
+		},
+	};
+	const { deliverTransaction } = createDelivery({ accounts, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.strictEqual(result.account, 'secondary');
+	assert.deepStrictEqual(posts, ['AK2']);
+});
+
+test('reports lookup failure when an account errors and no other account has the transaction', async () => {
+	const accounts = [
+		{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' },
+		{ name: 'secondary', accessKey: 'AK2', secretKey: 'SK2' },
+	];
+	const client = {
+		get: async (_url, { params }) => {
+			if (params.access_token === 'AK2') throw httpError(400);
+			return { status: 200, data: { status_code: '44' } };
+		},
+		post: async () => ({ status: 200, data: {} }),
+	};
+	const { deliverTransaction } = createDelivery({ accounts, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.strictEqual(result.lookupFailed, true);
 });

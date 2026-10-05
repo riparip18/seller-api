@@ -1,7 +1,8 @@
 // JavaScript configuration for Seller API credentials and base URL
 // NOTE: Do not expose these values on the frontend. They are used server-side only.
 
-// Credential profiles. Pick one with VC_PROFILE (default: "default").
+// Credential profiles. VC_PROFILE picks the one used by the dashboard APIs (default: "default").
+// The webhook tries every account in ACCOUNTS, so all sellers are delivered by one deployment.
 const PROFILES = {
 	default: {
 		accessKey: "LpfAISsamBMqcZBHSrzI",
@@ -24,4 +25,12 @@ const SECRET_KEY = process.env.VC_SECRET_KEY || PROFILE.secretKey;
 const BASE_URL = process.env.VC_BASE_URL || "https://apis.vcg.my.id"; // staging default
 const NGROK_STATIC_DOMAIN = process.env.NGROK_STATIC_DOMAIN || "shining-stork-briefly.ngrok-free.app";
 
-module.exports = { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN, PROFILES, PROFILE_NAME };
+// Accounts the webhook searches: env override first (if set), then every profile.
+const ACCOUNTS = [
+	...(process.env.VC_ACCESS_KEY && process.env.VC_SECRET_KEY
+		? [{ name: "env", accessKey: process.env.VC_ACCESS_KEY, secretKey: process.env.VC_SECRET_KEY }]
+		: []),
+	...Object.entries(PROFILES).map(([name, p]) => ({ name, ...p })),
+];
+
+module.exports = { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN, PROFILES, PROFILE_NAME, ACCOUNTS };
