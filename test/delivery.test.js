@@ -366,13 +366,16 @@ const NOT_FOUND = { status_code: '44', message: 'Data not found' };
 // Process answers per access key: `owners` maps a detail id to the access key that owns it.
 function accountClient(owners) {
 	const posts = [];
+	const bodies = [];
 	return {
 		posts,
+		bodies,
 		get: async () => {
 			throw new Error('lookup should not be needed');
 		},
-		post: async (_url, _body, { params }) => {
+		post: async (_url, body, { params }) => {
 			posts.push(`${params.access_token}:${params.transaction_detail_id}`);
+			bodies.push(body);
 			const owned = owners[params.transaction_detail_id] === params.access_token;
 			return { status: 200, data: owned ? { status_code: '00' } : NOT_FOUND };
 		},
@@ -383,10 +386,10 @@ test('extractWebhookItem reads the item a VCG transaction webhook is about', () 
 	const payload = {
 		seller_id: 's1',
 		message_type: 2,
-		data: { transaction_id: 't1', transaction_detail_id: 'd1', status: 2 },
+		data: { transaction_id: 't1', transaction_detail_id: 'd1', status: 2, qty: 996 },
 	};
 
-	assert.deepStrictEqual(extractWebhookItem(payload), { id: 'd1', status: 2, sellerId: 's1' });
+	assert.deepStrictEqual(extractWebhookItem(payload), { id: 'd1', status: 2, sellerId: 's1', qty: 996 });
 	assert.strictEqual(extractWebhookItem({ data: { transaction_id: 't1' } }), null);
 });
 
@@ -462,4 +465,42 @@ test('default budget gives up early enough to answer inside VCG\'s 10s webhook t
 	assert.strictEqual(client.calls.post.length, 3);
 	assert.strictEqual(clock - FIXED_NOW(), 6000);
 	assert.strictEqual(result.failed.length, 1);
+});
+
+// VCG answers 43 for a voucher/account item unless delivery_data has one entry per unit bought.
+test('an item bought in quantity is sent one delivery_data entry per unit', async () => {
+	const client = accountClient({ d1: 'AK1' });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1', qty: 996 });
+
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.strictEqual(client.bodies[0].delivery_data.length, 996);
+});
+
+test('a looked-up transaction sends each item delivery_data for its own quantity', async () => {
+	const sent = {};
+	const client = {
+		get: async () => ({ status: 200, data: { data: { items: [{ id: 'd1', qty: 2 }, { id: 'd2', qty: 5 }] } } }),
+		post: async (_url, body, { params }) => {
+			sent[params.transaction_detail_id] = body.delivery_data.length;
+			return { status: 200, data: { status_code: '00' } };
+		},
+	};
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+
+	await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(sent, { d1: 2, d2: 5 });
+});
+
+test('a missing, invalid or oversized quantity is sent a bounded delivery_data', async () => {
+	const client = accountClient({ d1: 'AK1', d2: 'AK1', d3: 'AK1' });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+
+	await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
+	await deliverTransaction('trx-1', { id: 'd2', status: 2, sellerId: 's1', qty: 'abc' });
+	await deliverTransaction('trx-1', { id: 'd3', status: 2, sellerId: 's1', qty: 1e9 });
+
+	assert.deepStrictEqual(client.bodies.map((b) => b.delivery_data.length), [1, 1, 10000]);
 });
