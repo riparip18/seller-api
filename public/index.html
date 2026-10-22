@@ -5,21 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>🎮 Seller API Control</title>
     
-    <!-- Ant Design CSS -->
+    <!-- Pin exact CDN versions: an unpinned @babel/standalone jumped to v8 and broke the page (blank screen). -->
+    <!-- Ant Design CSS (v5 is CSS-in-JS; reset.css is the only stylesheet it ships) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/antd@5.11.0/dist/reset.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/antd@5.11.0/dist/antd.min.css">
-    
+
     <!-- React & ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    
+    <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
     <!-- Day.js required by Ant Design UMD -->
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.13/dayjs.min.js"></script>
     <!-- Ant Design JS -->
     <script src="https://cdn.jsdelivr.net/npm/antd@5.11.0/dist/antd.min.js"></script>
-    
+
     <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js"></script>
     
     <style>
         body {
@@ -53,17 +53,189 @@
             margin-top: 16px;
             color: #666;
         }
+        .log-panel {
+            width: min(1100px, calc(100vw - 120px));
+            text-align: left;
+        }
+        .log-path {
+            font-family: SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+            font-size: 12px;
+        }
+        .log-json {
+            margin: 4px 0 12px;
+            padding: 8px 12px;
+            max-height: 260px;
+            overflow: auto;
+            background: #f6f8fa;
+            border-radius: 6px;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
-    <script type="text/babel" data-presets="env,react" data-plugins="proposal-optional-chaining">
-        const { useState, useEffect } = React;
-        const { Button, Typography, message, DatePicker, Card, Statistic, Space, Tabs, Radio, Select, Table, Spin, Divider } = antd;
+    <script type="text/babel" data-presets="env,react">
+        const { useState, useEffect, useRef } = React;
+        const { Button, Typography, message, DatePicker, Card, Statistic, Space, Tabs, Radio, Select, Table, Spin, Divider, Switch, Tag } = antd;
         const { Text, Title } = Typography;
 
+        // ===== Log API: incoming /webhook + /api/* hits and outgoing VCG calls (local server.js only) =====
+        const LOG_POLL_MS = 3000;
+        const MAX_LOG_ROWS = 200;
+
+        // VCG replies HTTP 200 even on failure; a status_code other than '00' is the real error.
+        const isVcgError = (code) => code != null && code !== '00';
+
+        const statusColor = (status, code) => {
+            if (status == null || status >= 500) return 'red';
+            if (status >= 400 || isVcgError(code)) return 'orange';
+            return 'green';
+        };
+
+        const renderStatus = (status, entry) => (
+            <Tag color={statusColor(status, entry.code)} title={isVcgError(entry.code) ? `VCG status_code ${entry.code}` : undefined}>
+                {status ?? 'ERR'}{isVcgError(entry.code) ? ` · ${entry.code}` : ''}
+            </Tag>
+        );
+
+        const LogJson = ({ label, value }) => value == null ? null : (
+            <div>
+                <Text strong>{label}</Text>
+                <pre className="log-json">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre>
+            </div>
+        );
+
+        const LOG_COLUMNS = [
+            { title: 'Waktu', dataIndex: 'ts', key: 'ts', width: 90, render: (ts) => dayjs(ts).format('HH:mm:ss') },
+            { title: 'Arah', dataIndex: 'direction', key: 'direction', width: 70, render: (d) => d === 'in' ? <Tag color="blue">IN</Tag> : <Tag color="purple">OUT</Tag> },
+            { title: 'Method', dataIndex: 'method', key: 'method', width: 80 },
+            { title: 'Path', dataIndex: 'path', key: 'path', ellipsis: true, render: (p) => <span className="log-path" title={p}>{p}</span> },
+            { title: 'Status', dataIndex: 'status', key: 'status', width: 100, render: renderStatus },
+            { title: 'Durasi', dataIndex: 'durationMs', key: 'durationMs', width: 90, align: 'right', render: (ms) => ms == null ? '-' : `${ms} ms` },
+        ];
+
+        const renderLogDetail = (entry) => (
+            <div>
+                {entry.error ? <div style={{ marginBottom: 8 }}><Text type="danger">{entry.error}</Text></div> : null}
+                <LogJson label="Params" value={entry.params} />
+                <LogJson label="Request" value={entry.request} />
+                <LogJson label="Response" value={entry.response} />
+                {entry.params == null && entry.request == null && entry.response == null && !entry.error
+                    ? <Text type="secondary">Tidak ada payload</Text> : null}
+            </div>
+        );
+
+        const MAX_POLL_FAILURES = 3;
+
+        const loadLogs = async (since) => {
+            const res = await fetch(`/api/logs?since=${since}`);
+            const data = await res.json();
+            if (!data.success) throw new Error(data.error);
+            return data.data || {};
+        };
+
+        function ApiLogPanel({ active }) {
+            const [logs, setLogs] = useState([]);
+            const [direction, setDirection] = useState('all'); // 'all' | 'in' | 'out'
+            const [autoRefresh, setAutoRefresh] = useState(true);
+            const lastIdRef = useRef(0);
+            const epochRef = useRef(null); // server process the rows came from
+            const generationRef = useRef(0); // bumped by Clear so in-flight results are dropped
+            const inFlightRef = useRef(false);
+            const failuresRef = useRef(0);
+
+            const fetchLogs = async () => {
+                if (inFlightRef.current) return;
+                inFlightRef.current = true;
+                const generation = generationRef.current;
+                try {
+                    let page = await loadLogs(lastIdRef.current);
+                    // Server restarted: its ids start over, so reload everything from the new process.
+                    const restarted = epochRef.current !== null && page.epoch !== epochRef.current;
+                    if (restarted) page = await loadLogs(0);
+                    if (generation !== generationRef.current) return;
+                    epochRef.current = page.epoch;
+                    lastIdRef.current = page.last_id ?? 0;
+                    const items = page.items || [];
+                    setLogs((prev) => {
+                        const kept = restarted ? [] : prev;
+                        const newest = kept[0]?.id ?? 0;
+                        return [...items.filter((e) => e.id > newest), ...kept].slice(0, MAX_LOG_ROWS);
+                    });
+                    failuresRef.current = 0;
+                } catch (_) {
+                    failuresRef.current += 1;
+                    if (failuresRef.current === 1) message.error('Gagal mengambil log API (hanya tersedia di server lokal)');
+                    // A server restart recovers on the next poll; stop only when it keeps failing.
+                    if (failuresRef.current >= MAX_POLL_FAILURES) setAutoRefresh(false);
+                } finally {
+                    inFlightRef.current = false;
+                }
+            };
+
+            const clearLogs = async () => {
+                try {
+                    const res = await fetch('/api/logs/clear', { method: 'POST' });
+                    const data = await res.json();
+                    if (!data.success) throw new Error(data.message || data.error);
+                    generationRef.current += 1;
+                    lastIdRef.current = data.data?.last_id ?? lastIdRef.current;
+                    epochRef.current = data.data?.epoch ?? epochRef.current;
+                    setLogs([]);
+                } catch (_) {
+                    message.error('Gagal menghapus log');
+                }
+            };
+
+            useEffect(() => { if (active) fetchLogs(); }, [active]);
+            useEffect(() => {
+                if (!active || !autoRefresh) return undefined;
+                failuresRef.current = 0;
+                const timer = setInterval(fetchLogs, LOG_POLL_MS);
+                return () => clearInterval(timer);
+            }, [active, autoRefresh]);
+
+            const visible = direction === 'all' ? logs : logs.filter((e) => e.direction === direction);
+
+            return (
+                <div className="log-panel">
+                    <Space wrap style={{ marginBottom: 8 }}>
+                        <Radio.Group value={direction} onChange={(e) => setDirection(e.target.value)}>
+                            <Radio.Button value="all">Semua</Radio.Button>
+                            <Radio.Button value="in">Masuk</Radio.Button>
+                            <Radio.Button value="out">Keluar (VCG)</Radio.Button>
+                        </Radio.Group>
+                        <Space size={6}>
+                            <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} data-testid="log-auto-refresh" />
+                            <Text>Auto refresh</Text>
+                        </Space>
+                        <Button onClick={fetchLogs} data-testid="log-refresh">Refresh</Button>
+                        <Button danger onClick={clearLogs} data-testid="log-clear">Clear</Button>
+                    </Space>
+                    <div style={{ marginBottom: 12 }}>
+                        <Text type="secondary">
+                            Hit masuk (/webhook, /api/*) dan call keluar ke VCG API. Disimpan di memory server lokal (maks {MAX_LOG_ROWS}), hilang saat server restart.
+                        </Text>
+                    </div>
+                    <Table
+                        rowKey="id"
+                        size="small"
+                        dataSource={visible}
+                        columns={LOG_COLUMNS}
+                        expandable={{ expandedRowRender: renderLogDetail }}
+                        pagination={{ pageSize: 20, showSizeChanger: false }}
+                        scroll={{ x: 700 }}
+                        locale={{ emptyText: 'Belum ada hit API' }}
+                    />
+                </div>
+            );
+        }
+
         function App() {
+            const [activeTab, setActiveTab] = useState('control');
             const [running, setRunning] = useState(false);
             const [loading, setLoading] = useState(false);
             const [urls, setUrls] = useState({ webhook_url: '', status_url: '' });
@@ -197,7 +369,8 @@
                 <div className="container">
                     <div className="panel">
                         <Tabs
-                          defaultActiveKey="control"
+                          activeKey={activeTab}
+                          onChange={setActiveTab}
                           items={[
                             {
                               key: 'control',
@@ -348,7 +521,12 @@
                                                                     </Space>
                                                                 </div>
                                                             )
-                                                        }
+                                                        },
+                            {
+                              key: 'log',
+                              label: 'Log API',
+                              children: <ApiLogPanel active={activeTab === 'log'} />
+                            }
                           ]}
                         />
                     </div>

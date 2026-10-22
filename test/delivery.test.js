@@ -17,12 +17,13 @@ function networkError() {
 	return err;
 }
 
-// Fake axios-like client: `get`/`post` handlers are queues of responses or errors.
+// Fake axios-like client: `get`/`post` handlers are queues of response bodies or errors.
 function fakeClient({ get = [], post = {} } = {}) {
-	const calls = { get: 0, post: [] };
+	const calls = { get: 0, post: [], getTimestamps: [], postTimestamps: [] };
 	return {
 		calls,
-		get: async () => {
+		get: async (_url, { params } = {}) => {
+			calls.getTimestamps.push(params?.timestamp);
 			const next = get[Math.min(calls.get++, get.length - 1)];
 			if (next instanceof Error) throw next;
 			return { status: 200, data: next };
@@ -30,14 +31,20 @@ function fakeClient({ get = [], post = {} } = {}) {
 		post: async (_url, _body, { params }) => {
 			const id = params.transaction_detail_id;
 			calls.post.push(id);
+			calls.postTimestamps.push(params.timestamp);
 			const queue = post[id] || [];
 			const attempt = calls.post.filter((x) => x === id).length - 1;
 			const next = queue[Math.min(attempt, queue.length - 1)];
 			if (next instanceof Error) throw next;
-			return { status: 200, data: {} };
+			return { status: 200, data: next ?? {} };
 		},
 	};
 }
+
+// VCG answers HTTP 200 with the outcome in status_code; these bodies are what staging returned.
+const SIGNATURE_USED = { status_code: '46', message: 'Signature already used' };
+const TIMESTAMP_EXPIRED = { status_code: '45', message: 'expired timestamp' };
+const FIXED_NOW = () => Date.UTC(2026, 9, 22, 4, 33, 30); // signature minute 202610220433
 
 const itemsResponse = (...ids) => ({ data: { items: ids.map((id) => ({ id })) } });
 
@@ -218,4 +225,132 @@ test('reports lookup failure when an account errors and no other account has the
 	const result = await deliverTransaction('trx-1');
 
 	assert.strictEqual(result.lookupFailed, true);
+});
+
+test('only processes items still waiting to be processed (status 2); retries of sent items succeed without re-sending', async () => {
+	const client = fakeClient({
+		get: [{ data: { items: [{ id: 'd1', status: 2 }, { id: 'd2', status: 3 }, { id: 'd3', status: 4 }] } }],
+	});
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+	const { toWebhookResponse } = require('../lib/delivery');
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(client.calls.post, ['d1']);
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.deepStrictEqual(result.skipped.sort(), ['d2', 'd3']);
+	assert.strictEqual(toWebhookResponse(result).status, 200);
+});
+
+test('lookup rejected with "Signature already used" retries with another minute instead of answering 404', async () => {
+	const client = fakeClient({ get: [SIGNATURE_USED, itemsResponse('d1')] });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.deepStrictEqual(client.calls.getTimestamps, ['202610220433', '202610220432']);
+});
+
+test('expired signature timestamp also moves on to the next minute', async () => {
+	const client = fakeClient({ get: [SIGNATURE_USED, TIMESTAMP_EXPIRED, itemsResponse('d1')] });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.deepStrictEqual(client.calls.getTimestamps, ['202610220433', '202610220432', '202610220434']);
+});
+
+test('lookup reports failure (502), not "not found" (404), when every signature minute is used', async () => {
+	const client = fakeClient({ get: [SIGNATURE_USED] });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { toWebhookResponse } = require('../lib/delivery');
+
+	const result = await deliverTransaction('trx-1');
+
+	// VCG accepts timestamps within ±2 minutes, so minutes M, M-1, M+1 and M+2 are usable.
+	assert.deepStrictEqual(client.calls.getTimestamps, ['202610220433', '202610220432', '202610220434', '202610220435']);
+	assert.strictEqual(result.lookupFailed, true);
+	assert.strictEqual(toWebhookResponse(result).status, 502);
+});
+
+// Behaves like VCG since 2026-10-21: a sign (path + access key + minute) is accepted once.
+function singleUseSignClient(items) {
+	const used = new Set();
+	const sent = [];
+	const rejectReuse = (url, params) => {
+		const key = `${url}|${params.access_token}|${params.timestamp}`;
+		sent.push(key);
+		if (used.has(key)) return { status: 200, data: SIGNATURE_USED };
+		used.add(key);
+		return null;
+	};
+	return {
+		sent,
+		get: async (url, { params }) => rejectReuse(url, params) || { status: 200, data: { status_code: '00', data: { items } } },
+		post: async (url, _body, { params }) => rejectReuse(url, params) || { status: 200, data: { status_code: '00' } },
+	};
+}
+
+test('parallel items on one account take distinct signature minutes; items beyond the usable minutes fail without a doomed request', async () => {
+	const client = singleUseSignClient(['d1', 'd2', 'd3', 'd4', 'd5'].map((id) => ({ id, status: 2 })));
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.strictEqual(result.processed.length, 4);
+	assert.strictEqual(result.failed.length, 1);
+	assert.match(result.failed[0].error, /46/);
+	assert.strictEqual(client.sent.filter((key) => key.includes('/process')).length, 4);
+});
+
+test('stops trying other signature minutes once the delivery deadline is spent', async () => {
+	let clock = FIXED_NOW();
+	const client = fakeClient({ get: [SIGNATURE_USED] });
+	const answer = client.get;
+	client.get = async (...args) => {
+		clock += 4000; // each VCG round trip takes 4s
+		return answer(...args);
+	};
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock, deadlineMs: 8000 });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.strictEqual(client.calls.getTimestamps.length, 2);
+	assert.strictEqual(result.lookupFailed, true);
+});
+
+test('process rejected with "Signature already used" is retried with another minute', async () => {
+	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [SIGNATURE_USED, { status_code: '00', message: 'Success' }] } });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.deepStrictEqual(client.calls.postTimestamps, ['202610220433', '202610220432']);
+});
+
+test('process answered with a VCG error code counts as failed, not delivered, so a later webhook can deliver it', async () => {
+	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [{ status_code: '50', message: 'Gagal' }, undefined] } });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const first = await deliverTransaction('trx-1');
+	const second = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(first.processed, []);
+	assert.strictEqual(first.failed[0].id, 'd1');
+	assert.match(first.failed[0].error, /50/);
+	assert.deepStrictEqual(second.processed, ['d1']);
+});
+
+test('webhook retry for an already delivered transaction returns 200 without calling process', async () => {
+	const client = fakeClient({ get: [{ data: { items: [{ id: 'd1', status: 3 }] } }] });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+	const { toWebhookResponse } = require('../lib/delivery');
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.strictEqual(client.calls.post.length, 0);
+	assert.strictEqual(toWebhookResponse(result).status, 200);
 });

@@ -7,14 +7,24 @@ const axios = require('axios');
 const fs = require('fs');
 
 const { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN } = require('./config');
-const { deliverTransaction, extractTrxId, toWebhookResponse } = require('./lib/delivery');
+const { deliverTransaction, extractTrxId, toWebhookResponse, httpClient } = require('./lib/delivery');
+const { createApiLog, attachAxiosLogger, requestLogger, isLocalRequest } = require('./lib/api-log');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const API_TIMEOUT = 10000; // 10s timeout for upstream API
 
+// ===== API hit log (shown in the "Log API" tab) =====
+const apiLog = createApiLog();
+attachAxiosLogger(axios, apiLog, { baseUrl: BASE_URL });
+attachAxiosLogger(httpClient, apiLog, { baseUrl: BASE_URL });
+// The page polls /api/logs, so logging it would flood the log with its own reads.
+const shouldLogHit = (p) => (p === '/webhook' || p.startsWith('/api/')) && !p.startsWith('/api/logs');
+
 // Middleware
 app.use(cors());
+// Before the JSON parser, so webhooks with a malformed body are logged too.
+app.use(requestLogger(apiLog, { shouldLog: shouldLogHit }));
 app.use(express.json());
 app.use(express.static('public'));
 
@@ -431,6 +441,25 @@ app.get('/api/product/variation-masters', async (req, res) => {
 app.post('/api/product/cache/clear', (req, res) => {
 	productCache.clear();
 	res.json({ success: true, message: 'Product cache cleared' });
+});
+
+// ===== API hit log =====
+// Entries hold webhook payloads (buyer data), so they are not served through the ngrok tunnel.
+function localOnly(req, res, next) {
+	if (isLocalRequest(req)) return next();
+	return res.status(403).json({ success: false, error: 'Log API hanya bisa diakses dari localhost' });
+}
+
+app.get('/api/logs', localOnly, (req, res) => {
+	const since = Number(req.query.since) || 0;
+	const { items, lastId, epoch } = apiLog.list({ since });
+	res.json({ success: true, data: { items, last_id: lastId, epoch } });
+});
+
+app.post('/api/logs/clear', localOnly, (req, res) => {
+	apiLog.clear();
+	const { lastId, epoch } = apiLog.list();
+	res.json({ success: true, message: 'API log cleared', data: { last_id: lastId, epoch } });
 });
 
 // ===== Control endpoints for Start/Stop (tunnel only) =====
