@@ -7,7 +7,7 @@ const axios = require('axios');
 const fs = require('fs');
 
 const { ACCESS_KEY, SECRET_KEY, BASE_URL, NGROK_STATIC_DOMAIN } = require('./config');
-const { deliverTransaction, extractTrxId, toWebhookResponse, httpClient } = require('./lib/delivery');
+const { deliverTransaction, extractTrxId, extractWebhookItem, toWebhookResponse, httpClient } = require('./lib/delivery');
 const { createApiLog, attachAxiosLogger, requestLogger, isLocalRequest } = require('./lib/api-log');
 
 const app = express();
@@ -154,7 +154,7 @@ app.all('/webhook', async (req, res) => {
 		if (payload.message_type === 2) {
 			const trxId = extractTrxId(payload);
 			if (!trxId) return res.status(400).json({ error: 'transaction_id tidak ada di payload' });
-			const result = await deliverTransaction(trxId);
+			const result = await deliverTransaction(trxId, extractWebhookItem(payload));
 			console.log('[webhook] trxId:', trxId, '| account:', result.account, '| processed:', result.processed, '| skipped:', result.skipped, '| failed:', result.failed.map(f => f.id));
 			const { status, body } = toWebhookResponse(result);
 			return body ? res.status(status).json(body) : res.status(status).send('');

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { createDelivery, extractTrxId } = require('../lib/delivery');
+const { createDelivery, extractTrxId, extractWebhookItem, toWebhookResponse } = require('../lib/delivery');
 
 const noSleep = () => Promise.resolve();
 const ONE = [{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' }];
@@ -353,4 +353,113 @@ test('webhook retry for an already delivered transaction returns 200 without cal
 
 	assert.strictEqual(client.calls.post.length, 0);
 	assert.strictEqual(toWebhookResponse(result).status, 200);
+});
+
+// VCG sends one webhook per detail item (and again on every status change), carrying the item id
+// and its status, so the item can be handled without looking the transaction up first.
+const TWO = [
+	{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' },
+	{ name: 'secondary', accessKey: 'AK2', secretKey: 'SK2' },
+];
+const NOT_FOUND = { status_code: '44', message: 'Data not found' };
+
+// Process answers per access key: `owners` maps a detail id to the access key that owns it.
+function accountClient(owners) {
+	const posts = [];
+	return {
+		posts,
+		get: async () => {
+			throw new Error('lookup should not be needed');
+		},
+		post: async (_url, _body, { params }) => {
+			posts.push(`${params.access_token}:${params.transaction_detail_id}`);
+			const owned = owners[params.transaction_detail_id] === params.access_token;
+			return { status: 200, data: owned ? { status_code: '00' } : NOT_FOUND };
+		},
+	};
+}
+
+test('extractWebhookItem reads the item a VCG transaction webhook is about', () => {
+	const payload = {
+		seller_id: 's1',
+		message_type: 2,
+		data: { transaction_id: 't1', transaction_detail_id: 'd1', status: 2 },
+	};
+
+	assert.deepStrictEqual(extractWebhookItem(payload), { id: 'd1', status: 2, sellerId: 's1' });
+	assert.strictEqual(extractWebhookItem({ data: { transaction_id: 't1' } }), null);
+});
+
+test('a status-change webhook (item no longer waiting) answers 200 without calling VCG', async () => {
+	const client = fakeClient();
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 3, sellerId: 's1' });
+
+	assert.strictEqual(client.calls.get, 0);
+	assert.deepStrictEqual(client.calls.post, []);
+	assert.strictEqual(toWebhookResponse(result).status, 200);
+});
+
+test('a new-order webhook processes its own item directly, without a lookup', async () => {
+	const client = accountClient({ d2: 'AK1' });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1', { id: 'd2', status: 2, sellerId: 's1' });
+
+	assert.deepStrictEqual(client.posts, ['AK1:d2']);
+	assert.deepStrictEqual(result.processed, ['d2']);
+	assert.strictEqual(toWebhookResponse(result).status, 200);
+});
+
+test('an item owned by another account is processed with that account, which is remembered for the seller', async () => {
+	const client = accountClient({ d1: 'AK2', d2: 'AK2' });
+	const { deliverTransaction } = createDelivery({ accounts: TWO, client, sleep: noSleep });
+
+	const first = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's2' });
+	const second = await deliverTransaction('trx-2', { id: 'd2', status: 2, sellerId: 's2' });
+
+	assert.deepStrictEqual(first.processed, ['d1']);
+	assert.strictEqual(first.account, 'secondary');
+	assert.deepStrictEqual(second.processed, ['d2']);
+	assert.deepStrictEqual(client.posts, ['AK1:d1', 'AK2:d1', 'AK2:d2']);
+});
+
+test('an item no account owns answers 404', async () => {
+	const client = accountClient({});
+	const { deliverTransaction } = createDelivery({ accounts: TWO, client, sleep: noSleep });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's9' });
+
+	assert.strictEqual(toWebhookResponse(result).status, 404);
+});
+
+test('item webhooks of one transaction arriving together are each delivered', async () => {
+	const client = accountClient({ d1: 'AK1', d2: 'AK1' });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+
+	const [a, b] = await Promise.all([
+		deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' }),
+		deliverTransaction('trx-1', { id: 'd2', status: 2, sellerId: 's1' }),
+	]);
+
+	assert.deepStrictEqual([...a.processed, ...b.processed].sort(), ['d1', 'd2']);
+});
+
+test('default budget gives up early enough to answer inside VCG\'s 10s webhook timeout after a cold start', async () => {
+	let clock = FIXED_NOW();
+	const client = fakeClient({ post: { d1: [SIGNATURE_USED] } });
+	const answer = client.post;
+	client.post = async (...args) => {
+		clock += 2000; // each VCG round trip takes 2s
+		return answer(...args);
+	};
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
+
+	// Netlify cold start already eats ~2-3s of VCG's 10s, so the work itself must stop by ~6s.
+	assert.strictEqual(client.calls.post.length, 3);
+	assert.strictEqual(clock - FIXED_NOW(), 6000);
+	assert.strictEqual(result.failed.length, 1);
 });
