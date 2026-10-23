@@ -3,8 +3,8 @@ const { deliverTransaction, extractTrxId, extractWebhookItem, toWebhookResponse 
 const { verifyWebhook, buildAuditEntry, auditKey } = require('../../lib/webhook-audit');
 
 const AUDIT_STORE = 'webhook-log';
-// VCG waits 10s for the answer, so recording a webhook may never hold it up for long.
-const AUDIT_WRITE_TIMEOUT_MS = 1000;
+// VCG waits 10s for the answer and delivery may already use ~6s of it, so recording gets little time.
+const AUDIT_WRITE_TIMEOUT_MS = 500;
 
 const json = (statusCode, body) => ({
 	statusCode,
@@ -12,9 +12,10 @@ const json = (statusCode, body) => ({
 	body: body ? JSON.stringify(body) : '',
 });
 
-function rawBodyOf(event) {
-	if (!event.body) return '';
-	return event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
+// The exact request bytes: VCG signs those, so the signature check must not see a re-encoded string.
+function bodyBytes(event) {
+	if (!event.body) return Buffer.alloc(0);
+	return Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
 }
 
 async function handle(event, rawBody) {
@@ -52,16 +53,20 @@ async function handle(event, rawBody) {
 	}
 }
 
-// Recording is a side channel: a failed or slow write must not change the answer VCG gets.
-async function recordAudit(event, entry) {
+// Recording is a side channel: whatever fails or stalls in it, VCG gets the answer for the work
+// already done. A write still running at the timeout is abandoned and may be lost.
+async function recordAudit(event, { receivedAt, bytes, response }) {
 	let timer;
 	try {
+		const verification = verifyWebhook(event.headers, bytes);
+		const entry = buildAuditEntry({ receivedAt, rawBody: bytes.toString('utf8'), verification, response, durationMs: Date.now() - receivedAt.getTime() });
 		connectLambda(event);
-		const write = getStore(AUDIT_STORE).setJSON(auditKey(entry), entry);
-		const timeout = new Promise((resolve) => { timer = setTimeout(resolve, AUDIT_WRITE_TIMEOUT_MS); });
-		await Promise.race([write, timeout]);
+		const write = getStore(AUDIT_STORE).setJSON(auditKey(entry), entry).then(() => 'saved', (e) => `failed: ${e.message}`);
+		const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('timed out'), AUDIT_WRITE_TIMEOUT_MS); });
+		const outcome = await Promise.race([write, timeout]);
+		if (outcome !== 'saved') console.warn('[webhook] audit write', outcome, entry.transaction_detail_id);
 	} catch (e) {
-		console.warn('[webhook] audit write failed:', e.message);
+		console.warn('[webhook] audit failed:', e.message);
 	} finally {
 		clearTimeout(timer);
 	}
@@ -69,12 +74,8 @@ async function recordAudit(event, entry) {
 
 exports.handler = async function handler(event) {
 	const receivedAt = new Date();
-	const rawBody = rawBodyOf(event);
-	const response = await handle(event, rawBody);
-	if (event.httpMethod === 'POST') {
-		const verification = verifyWebhook(event.headers, rawBody);
-		const entry = buildAuditEntry({ receivedAt, rawBody, verification, response, durationMs: Date.now() - receivedAt.getTime() });
-		await recordAudit(event, entry);
-	}
+	const bytes = bodyBytes(event);
+	const response = await handle(event, bytes.toString('utf8'));
+	if (event.httpMethod === 'POST') await recordAudit(event, { receivedAt, bytes, response });
 	return response;
 };

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const crypto = require('node:crypto');
-const { verifyWebhook, buildAuditEntry, auditKey } = require('../lib/webhook-audit');
+const { verifyWebhook, buildAuditEntry, auditKey, auditDayPrefix } = require('../lib/webhook-audit');
 
 const ACCOUNTS = [
 	{ name: 'default', accessKey: 'AK1', secretKey: 'SK1' },
@@ -71,6 +71,48 @@ test('an audit entry keeps what VCG sent and what the bot answered, without cust
 	assert.doesNotMatch(JSON.stringify(entry), /Meter|customer/);
 });
 
+test('an account without a secret key is skipped instead of breaking the check', () => {
+	const accounts = [{ name: 'env', accessKey: 'AK0', secretKey: undefined }, ...ACCOUNTS];
+
+	const result = verifyWebhook(signedHeaders('SK2'), RAW_BODY, accounts);
+
+	assert.strictEqual(result.account, 'secondary');
+});
+
+test('an uppercase hex signature is accepted', () => {
+	const { 'x-vcg-timestamp': ts, 'x-vcg-signature': sig } = signedHeaders('SK1');
+
+	assert.strictEqual(verifyWebhook({ 'x-vcg-timestamp': ts, 'x-vcg-signature': sig.toUpperCase() }, RAW_BODY, ACCOUNTS).valid, true);
+});
+
+test('a body given as bytes is checked on those exact bytes', () => {
+	const body = '{"data":{"product_name":"Token Listrik ✓ é"}}\n';
+	const headers = { 'x-vcg-timestamp': TIMESTAMP, 'x-vcg-signature': vcgSignature('SK1', TIMESTAMP, Buffer.from(body, 'utf8')) };
+
+	assert.strictEqual(verifyWebhook(headers, Buffer.from(body, 'utf8'), ACCOUNTS).account, 'default');
+});
+
+test('only the bot outcome is kept from its answer: echoed payload data never reaches the log', () => {
+	const answer = {
+		error: 'Sebagian transaksi gagal diproses',
+		processed: 0,
+		failed: [{ id: 'd1', ok: false, status: null, code: '46', error: 'VCG 46: nonce is required' }],
+		payload_data: { customer_data: { meter: '123' }, note: 'No. Meter: 123' },
+	};
+
+	const entry = buildAuditEntry({
+		receivedAt: new Date('2026-10-23T09:10:00.000Z'),
+		rawBody: RAW_BODY,
+		verification: verifyWebhook({}, RAW_BODY, ACCOUNTS),
+		response: { statusCode: 500, body: JSON.stringify({ ...answer, error: `${answer.error}${'x'.repeat(500)}` }) },
+		durationMs: 1,
+	});
+
+	assert.doesNotMatch(JSON.stringify(entry), /Meter|customer|payload_data/);
+	assert.deepStrictEqual(entry.response.body.failed, [{ id: 'd1', code: '46', error: 'VCG 46: nonce is required' }]);
+	assert.ok(entry.response.body.error.length <= 201);
+});
+
 test('an unparseable body is still recorded', () => {
 	const entry = buildAuditEntry({
 		receivedAt: new Date('2026-10-23T09:10:00.000Z'),
@@ -84,11 +126,12 @@ test('an unparseable body is still recorded', () => {
 	assert.strictEqual(entry.response.status, 500);
 });
 
-test('audit keys sort by arrival time and name the detail item', () => {
+test('audit keys group by UTC day, sort by arrival time and name the detail item', () => {
 	const at = (iso) => ({ received_at: iso, transaction_detail_id: 'd1' });
-	const keys = [auditKey(at('2026-10-23T09:10:00.500Z')), auditKey(at('2026-10-23T09:09:59.999Z'))];
+	const keys = [auditKey(at('2026-10-23T09:10:00.500Z')), auditKey(at('2026-10-23T09:09:59.999Z')), auditKey(at('2026-10-24T00:00:00.000Z'))];
 
-	assert.ok(keys[1] < keys[0]);
+	assert.ok(keys[1] < keys[0] && keys[0] < keys[2]);
+	assert.ok(keys[0].startsWith(auditDayPrefix(new Date('2026-10-23T23:59:59Z'))));
 	assert.match(keys[0], /d1/);
 	assert.doesNotMatch(keys[0], /[:.]/);
 });
