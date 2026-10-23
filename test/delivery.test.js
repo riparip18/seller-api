@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const crypto = require('node:crypto');
 const { createDelivery, extractTrxId, extractWebhookItem, toWebhookResponse } = require('../lib/delivery');
 
 const noSleep = () => Promise.resolve();
@@ -19,11 +20,12 @@ function networkError() {
 
 // Fake axios-like client: `get`/`post` handlers are queues of response bodies or errors.
 function fakeClient({ get = [], post = {} } = {}) {
-	const calls = { get: 0, post: [], getTimestamps: [], postTimestamps: [] };
+	const calls = { get: 0, post: [], getTimestamps: [], postTimestamps: [], getParams: [], postParams: [] };
 	return {
 		calls,
 		get: async (_url, { params } = {}) => {
 			calls.getTimestamps.push(params?.timestamp);
+			calls.getParams.push(params);
 			const next = get[Math.min(calls.get++, get.length - 1)];
 			if (next instanceof Error) throw next;
 			return { status: 200, data: next };
@@ -32,6 +34,7 @@ function fakeClient({ get = [], post = {} } = {}) {
 			const id = params.transaction_detail_id;
 			calls.post.push(id);
 			calls.postTimestamps.push(params.timestamp);
+			calls.postParams.push(params);
 			const queue = post[id] || [];
 			const attempt = calls.post.filter((x) => x === id).length - 1;
 			const next = queue[Math.min(attempt, queue.length - 1)];
@@ -47,6 +50,101 @@ const TIMESTAMP_EXPIRED = { status_code: '45', message: 'expired timestamp' };
 const FIXED_NOW = () => Date.UTC(2026, 9, 22, 4, 33, 30); // signature minute 202610220433
 
 const itemsResponse = (...ids) => ({ data: { items: ids.map((id) => ({ id })) } });
+
+// The minute-fallback tests describe signing without a nonce (VC_REST_NONCE=false).
+const LEGACY_SIGN = { useNonce: false };
+
+function expectedSign(path, accessKey, secretKey, timestamp, nonce = '') {
+	const hex = crypto.createHmac('sha512', secretKey).update(`${path}${accessKey}${timestamp}${nonce}`, 'utf8').digest('hex');
+	return Buffer.from(hex, 'utf8').toString('base64');
+}
+
+// Behaves like VCG 1.1.42 with REST_NONCE_REQUIRED=true: every request needs a nonce it has not seen.
+function nonceRequiredClient(items) {
+	const used = new Set();
+	const posts = [];
+	const reject = (params) => {
+		if (!params.nonce) return { status_code: '46', message: 'nonce is required' };
+		if (used.has(params.nonce)) return { status_code: '46', message: 'nonce already used' };
+		used.add(params.nonce);
+		return null;
+	};
+	return {
+		posts,
+		get: async (_url, { params }) => ({ status: 200, data: reject(params) || { status_code: '00', data: { items } } }),
+		post: async (_url, _body, { params }) => {
+			posts.push(params);
+			return { status: 200, data: reject(params) || { status_code: '00' } };
+		},
+	};
+}
+
+test('signs every call with a fresh nonce that is part of the signature', async () => {
+	const client = fakeClient({ get: [itemsResponse('d1', 'd2')] });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, useNonce: true });
+
+	await deliverTransaction('trx-1');
+
+	const sent = [
+		['/rest/transaction/get', client.calls.getParams[0]],
+		...client.calls.postParams.map((params) => ['/rest/transaction/process', params]),
+	];
+	assert.strictEqual(new Set(sent.map(([, params]) => params.nonce)).size, 3);
+	for (const [path, params] of sent) {
+		assert.match(params.nonce, /^[A-Za-z0-9_-]{16,64}$/);
+		assert.strictEqual(params.timestamp, '202610220433');
+		assert.strictEqual(params.sign, expectedSign(path, 'AK1', 'SK1', params.timestamp, params.nonce));
+	}
+});
+
+test('with a nonce, every item of a transaction is delivered in the same minute, past the four usable signature minutes', async () => {
+	const ids = ['d1', 'd2', 'd3', 'd4', 'd5', 'd6'];
+	const client = nonceRequiredClient(ids.map((id) => ({ id, status: 2 })));
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, useNonce: true });
+
+	const result = await deliverTransaction('trx-1');
+
+	assert.deepStrictEqual(result.processed.sort(), ids);
+	assert.strictEqual(client.posts.length, ids.length);
+	assert.deepStrictEqual(new Set(client.posts.map((params) => params.timestamp)), new Set(['202610220433']));
+});
+
+// VCG refuses to process an item that is no longer waiting (status 2), so a fresh nonce on a retry
+// cannot deliver twice, while reusing it would turn a retry after a 429 into "nonce already used".
+test('with a nonce, a retried process call is signed with a new nonce', async () => {
+	const client = fakeClient({ post: { d1: [networkError(), undefined] } });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, useNonce: true });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
+
+	const [first, retry] = client.calls.postParams;
+	assert.deepStrictEqual(result.processed, ['d1']);
+	assert.notStrictEqual(first.nonce, retry.nonce);
+	assert.strictEqual(retry.sign, expectedSign('/rest/transaction/process', 'AK1', 'SK1', retry.timestamp, retry.nonce));
+});
+
+test('with a nonce, a rejected signature is not resent with other minutes', async () => {
+	const client = fakeClient({ post: { d1: [{ status_code: '46', message: 'Signature Invalid' }] } });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, useNonce: true });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
+
+	assert.strictEqual(client.calls.post.length, 1);
+	assert.match(result.failed[0].error, /Signature Invalid/);
+});
+
+test('VC_REST_NONCE=false signs the old way, which a VCG requiring a nonce refuses', async () => {
+	const client = nonceRequiredClient([]);
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
+
+	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
+
+	const [first] = client.posts;
+	assert.strictEqual(first.nonce, undefined);
+	assert.strictEqual(first.sign, expectedSign('/rest/transaction/process', 'AK1', 'SK1', first.timestamp));
+	assert.match(result.failed[0].error, /nonce is required/);
+	assert.strictEqual(toWebhookResponse(result).status, 500);
+});
 
 test('delivers every detail item of a transaction', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1', 'd2', 'd3')] });
@@ -244,7 +342,7 @@ test('only processes items still waiting to be processed (status 2); retries of 
 
 test('lookup rejected with "Signature already used" retries with another minute instead of answering 404', async () => {
 	const client = fakeClient({ get: [SIGNATURE_USED, itemsResponse('d1')] });
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -254,7 +352,7 @@ test('lookup rejected with "Signature already used" retries with another minute 
 
 test('expired signature timestamp also moves on to the next minute', async () => {
 	const client = fakeClient({ get: [SIGNATURE_USED, TIMESTAMP_EXPIRED, itemsResponse('d1')] });
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -264,7 +362,7 @@ test('expired signature timestamp also moves on to the next minute', async () =>
 
 test('lookup reports failure (502), not "not found" (404), when every signature minute is used', async () => {
 	const client = fakeClient({ get: [SIGNATURE_USED] });
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
 	const { toWebhookResponse } = require('../lib/delivery');
 
 	const result = await deliverTransaction('trx-1');
@@ -295,7 +393,7 @@ function singleUseSignClient(items) {
 
 test('parallel items on one account take distinct signature minutes; items beyond the usable minutes fail without a doomed request', async () => {
 	const client = singleUseSignClient(['d1', 'd2', 'd3', 'd4', 'd5'].map((id) => ({ id, status: 2 })));
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -313,7 +411,7 @@ test('stops trying other signature minutes once the delivery deadline is spent',
 		clock += 4000; // each VCG round trip takes 4s
 		return answer(...args);
 	};
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock, deadlineMs: 8000 });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock, deadlineMs: 8000, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -323,7 +421,7 @@ test('stops trying other signature minutes once the delivery deadline is spent',
 
 test('process rejected with "Signature already used" is retried with another minute', async () => {
 	const client = fakeClient({ get: [itemsResponse('d1')], post: { d1: [SIGNATURE_USED, { status_code: '00', message: 'Success' }] } });
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: FIXED_NOW, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1');
 
@@ -457,7 +555,7 @@ test('default budget gives up early enough to answer inside VCG\'s 10s webhook t
 		clock += 2000; // each VCG round trip takes 2s
 		return answer(...args);
 	};
-	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock });
+	const { deliverTransaction } = createDelivery({ accounts: ONE, client, sleep: noSleep, now: () => clock, ...LEGACY_SIGN });
 
 	const result = await deliverTransaction('trx-1', { id: 'd1', status: 2, sellerId: 's1' });
 
