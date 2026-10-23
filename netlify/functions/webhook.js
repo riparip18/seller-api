@@ -1,4 +1,10 @@
+const { connectLambda, getStore } = require('@netlify/blobs');
 const { deliverTransaction, extractTrxId, extractWebhookItem, toWebhookResponse } = require('../../lib/delivery');
+const { verifyWebhook, buildAuditEntry, auditKey } = require('../../lib/webhook-audit');
+
+const AUDIT_STORE = 'webhook-log';
+// VCG waits 10s for the answer, so recording a webhook may never hold it up for long.
+const AUDIT_WRITE_TIMEOUT_MS = 1000;
 
 const json = (statusCode, body) => ({
 	statusCode,
@@ -6,7 +12,12 @@ const json = (statusCode, body) => ({
 	body: body ? JSON.stringify(body) : '',
 });
 
-exports.handler = async function handler(event) {
+function rawBodyOf(event) {
+	if (!event.body) return '';
+	return event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
+}
+
+async function handle(event, rawBody) {
 	if (event.httpMethod === 'GET') {
 		return json(200, { message: 'Endpoint webhook tersedia' });
 	}
@@ -16,7 +27,7 @@ exports.handler = async function handler(event) {
 	}
 
 	try {
-		const payload = event.body ? JSON.parse(event.body) : {};
+		const payload = rawBody ? JSON.parse(rawBody) : {};
 		if (!payload || Object.keys(payload).length === 0) {
 			return json(400, { error: 'Payload kosong' });
 		}
@@ -40,3 +51,30 @@ exports.handler = async function handler(event) {
 		return json(500, { error: String(e.message || e) });
 	}
 }
+
+// Recording is a side channel: a failed or slow write must not change the answer VCG gets.
+async function recordAudit(event, entry) {
+	let timer;
+	try {
+		connectLambda(event);
+		const write = getStore(AUDIT_STORE).setJSON(auditKey(entry), entry);
+		const timeout = new Promise((resolve) => { timer = setTimeout(resolve, AUDIT_WRITE_TIMEOUT_MS); });
+		await Promise.race([write, timeout]);
+	} catch (e) {
+		console.warn('[webhook] audit write failed:', e.message);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+exports.handler = async function handler(event) {
+	const receivedAt = new Date();
+	const rawBody = rawBodyOf(event);
+	const response = await handle(event, rawBody);
+	if (event.httpMethod === 'POST') {
+		const verification = verifyWebhook(event.headers, rawBody);
+		const entry = buildAuditEntry({ receivedAt, rawBody, verification, response, durationMs: Date.now() - receivedAt.getTime() });
+		await recordAudit(event, entry);
+	}
+	return response;
+};

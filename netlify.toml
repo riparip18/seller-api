@@ -29,6 +29,12 @@
   force = true
 
 [[redirects]]
+  from = "/api/webhook-log"
+  to = "/.netlify/functions/webhook-log"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/api/transactions"
   to = "/.netlify/functions/transactions"
   status = 200
